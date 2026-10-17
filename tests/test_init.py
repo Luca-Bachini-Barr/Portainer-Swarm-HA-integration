@@ -137,3 +137,18 @@ async def test_options_flow(hass: HomeAssistant, entry) -> None:
     await hass.async_block_till_done()
     assert entry.options["image_check"] is False
     assert hass.states.get("sensor.docker_swarm_image_updates").attributes["enabled"] is False
+
+
+async def test_device_hierarchy(hass: HomeAssistant, entry) -> None:
+    registry = dr.async_get(hass)
+    devices = {
+        next(i[1] for i in d.identifiers if i[0] == DOMAIN): d
+        for d in dr.async_entries_for_config_entry(registry, entry.entry_id)
+    }
+    prefix = f"{entry.entry_id}_"
+    swarm = devices[f"{prefix}swarm"]
+    assert swarm.via_device_id is None
+    assert devices[f"{prefix}pi1"].via_device_id == swarm.id
+    assert devices[f"{prefix}stack_web"].via_device_id == swarm.id
+    assert devices[f"{prefix}service_web_app"].via_device_id == devices[f"{prefix}stack_web"].id
+    assert devices[f"{prefix}container_pi2/glances"].via_device_id == devices[f"{prefix}pi2"].id

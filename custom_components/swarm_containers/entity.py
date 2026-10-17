@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from homeassistant.core import callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -54,64 +55,97 @@ def keys_for(data: dict[str, Any], kind: str) -> Iterable[str]:
     return data["standalone"].keys()
 
 
-def device_info(coordinator: SwarmContainersCoordinator, kind: str, key: str) -> DeviceInfo:
-    """Build the device for an object. Nodes, stacks and containers hang off the swarm."""
+def _parent(data: dict[str, Any], kind: str, key: str) -> tuple[str, str] | None:
+    """Return the (kind, key) of the device an object's device hangs off."""
+    if kind == SWARM:
+        return None
+    if kind == SERVICE:
+        stack = (data["services"].get(key) or {}).get("stack")
+        return (STACK, stack) if stack in data["stacks"] else (SWARM, SWARM)
+    if kind == CONTAINER:
+        node = (data["standalone"].get(key) or {}).get("node")
+        return (NODE, node) if node in data["nodes"] else (SWARM, SWARM)
+    return (SWARM, SWARM)
+
+
+def _device_fields(coordinator: SwarmContainersCoordinator, kind: str, key: str) -> dict[str, Any]:
+    """Return the device registry fields for an object, without its parent."""
     entry_id = coordinator.config_entry.entry_id
     data = coordinator.data
     base_url = str(coordinator.config_entry.data["url"]).rstrip("/")
     endpoint = coordinator.endpoint_id
     if kind == SWARM:
-        return DeviceInfo(
-            identifiers={swarm_identifier(entry_id)},
-            name="Docker Swarm",
-            manufacturer="Docker Swarm",
-            model=MODEL_SWARM,
-            configuration_url=f"{base_url}/#!/{endpoint}/docker/swarm",
-        )
+        return {
+            "identifiers": {swarm_identifier(entry_id)},
+            "name": "Docker Swarm",
+            "manufacturer": "Docker Swarm",
+            "model": MODEL_SWARM,
+            "configuration_url": f"{base_url}/#!/{endpoint}/docker/swarm",
+        }
     if kind == NODE:
         info = (data["nodes"].get(key) or {}).get("info") or {}
-        return DeviceInfo(
-            identifiers={node_identifier(entry_id, key)},
-            name=key,
-            manufacturer="Docker Swarm",
-            model=MODEL_NODE,
-            sw_version=info.get("engine_version"),
-            via_device=swarm_identifier(entry_id),
-        )
+        return {
+            "identifiers": {node_identifier(entry_id, key)},
+            "name": key,
+            "manufacturer": "Docker Swarm",
+            "model": MODEL_NODE,
+            "sw_version": info.get("engine_version"),
+        }
     if kind == STACK:
         stack = data["stacks"].get(key) or {}
         url = f"{base_url}/#!/{endpoint}/docker/stacks/{key}"
         if stack.get("portainer_id"):
             url += f"?id={stack['portainer_id']}&type=1&regular=true"
-        return DeviceInfo(
-            identifiers={stack_identifier(entry_id, key)},
-            name=f"Stack {key}",
-            manufacturer="Docker Swarm",
-            model=MODEL_STACK,
-            configuration_url=url,
-            via_device=swarm_identifier(entry_id),
-        )
+        return {
+            "identifiers": {stack_identifier(entry_id, key)},
+            "name": f"Stack {key}",
+            "manufacturer": "Docker Swarm",
+            "model": MODEL_STACK,
+            "configuration_url": url,
+        }
     if kind == SERVICE:
         service = data["services"].get(key) or {}
-        stack = service.get("stack")
-        return DeviceInfo(
-            identifiers={service_identifier(entry_id, key)},
-            name=f"Service {key}",
-            manufacturer="Docker Swarm",
-            model=MODEL_SERVICE,
-            sw_version=service.get("image"),
-            configuration_url=f"{base_url}/#!/{endpoint}/docker/services/{service.get('id', '')}",
-            via_device=stack_identifier(entry_id, stack) if stack in data["stacks"] else swarm_identifier(entry_id),
-        )
+        return {
+            "identifiers": {service_identifier(entry_id, key)},
+            "name": f"Service {key}",
+            "manufacturer": "Docker Swarm",
+            "model": MODEL_SERVICE,
+            "sw_version": service.get("image"),
+            "configuration_url": f"{base_url}/#!/{endpoint}/docker/services/{service.get('id', '')}",
+        }
     container = data["standalone"].get(key) or {}
-    return DeviceInfo(
-        identifiers={container_identifier(entry_id, key)},
-        name=key.replace("/", " "),
-        manufacturer="Docker",
-        model=MODEL_CONTAINER,
-        sw_version=container.get("image"),
-        via_device=node_identifier(entry_id, container.get("node", "")),
+    return {
+        "identifiers": {container_identifier(entry_id, key)},
+        "name": key.replace("/", " "),
+        "manufacturer": "Docker",
+        "model": MODEL_CONTAINER,
+        "sw_version": container.get("image"),
+    }
+
+
+@callback
+def _ensure_device(coordinator: SwarmContainersCoordinator, kind: str, key: str) -> str:
+    """Register an object's device (and its parents first) and return its id."""
+    parent = _parent(coordinator.data, kind, key)
+    via_device_id = _ensure_device(coordinator, *parent) if parent else None
+    device = dr.async_get(coordinator.hass).async_get_or_create(
+        config_entry_id=coordinator.config_entry.entry_id,
+        via_device_id=via_device_id,
+        **_device_fields(coordinator, kind, key),
     )
+    return device.id
+
+
+def device_info(coordinator: SwarmContainersCoordinator, kind: str, key: str) -> DeviceInfo:
+    """Build the device for an object, linked to its parent by device id.
+
+    Nodes, stacks and standalone containers hang off the swarm device (containers off
+    their node), and services off their stack.
+    """
+    info = DeviceInfo(**_device_fields(coordinator, kind, key))
+    if parent := _parent(coordinator.data, kind, key):
+        info["via_device_id"] = _ensure_device(coordinator, *parent)
+    return info
 
 
 class SwarmEntity(CoordinatorEntity[SwarmContainersCoordinator]):
