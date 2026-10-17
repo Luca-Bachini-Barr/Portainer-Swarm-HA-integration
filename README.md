@@ -47,7 +47,7 @@ Devices for stacks, services and containers that disappear are removed automatic
 
 ## Dashboard cards
 
-The cards are bundled and load automatically. There's no dashboard resource to add. Search for "Swarm" in the add-card dialog. Each card has a visual editor.
+The cards are bundled with the integration, which adds them to your dashboard resources itself (and updates the entry after an upgrade). There's nothing to install separately. Search for "Swarm" in the add-card dialog. Each card has a visual editor.
 
 | Card | Shows |
 |---|---|
