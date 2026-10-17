@@ -167,7 +167,7 @@
         "name": "Problem"
       },
       "online": {
-        "name": "Online"
+        "name": "Node ready"
       },
       "update_available": {
         "name": "Image update"

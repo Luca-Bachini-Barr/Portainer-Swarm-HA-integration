@@ -6,18 +6,18 @@ Home Assistant's built-in Portainer integration fails on swarm environments beca
 
 ## What it creates
 
-### Swarm (one device)
+### Docker Swarm (one device)
 
 | Entity | State | Attributes |
 |---|---|---|
-| `sensor.swarm_nodes_ready` | Nodes in the `ready` state | `total`, `managers`, `leader`, `nodes` |
-| `sensor.swarm_services_running` | Services running as desired | `total`, `problems` |
-| `sensor.swarm_stacks` | Number of stacks | stack names by state |
-| `sensor.swarm_tasks_running` | Running swarm tasks | |
-| `sensor.swarm_image_updates` | Images with a newer version | `updates`, `last_checked` |
-| `sensor.swarm_task_failures_24h` | Tasks that failed or were rejected in the last 24 hours | per service |
-| `binary_sensor.swarm_problem` | On when a node is not ready, a service is down, degraded or has a paused update, or a container is unhealthy | `reasons` |
-| `button.swarm_check_for_image_updates` | Runs the image check now | |
+| `sensor.docker_swarm_nodes_ready` | Nodes in the `ready` state | `total`, `managers`, `leader`, `nodes` |
+| `sensor.docker_swarm_services_running` | Services running as desired | `total`, `problems` |
+| `sensor.docker_swarm_stacks` | Number of stacks | stack names by state |
+| `sensor.docker_swarm_tasks_running` | Running swarm tasks | |
+| `sensor.docker_swarm_image_updates` | Images with a newer version | `updates`, `last_checked` |
+| `sensor.docker_swarm_task_failures_24h` | Tasks that failed or were rejected in the last 24 hours | per service |
+| `binary_sensor.docker_swarm_problem` | On when a node is not ready, a service is down, degraded or has a paused update, or a container is unhealthy | `reasons` |
+| `button.docker_swarm_check_for_image_updates` | Runs the image check now | |
 
 ### Each node
 
@@ -28,7 +28,7 @@ Home Assistant's built-in Portainer integration fails on swarm environments beca
 | `sensor.<node>_container_memory` / `_container_memory_usage` | Memory used by containers (MiB / % of the node) |
 | `sensor.<node>_tasks` | Swarm tasks running on the node |
 | `sensor.<node>_role` | `manager` or `worker`; leader, availability, address and engine version as attributes |
-| `binary_sensor.<node>_online` | Node is `ready` |
+| `binary_sensor.<node>_node_ready` | Node is `ready` |
 | `sensor.<node>_images` / `_volumes` / `_networks` | Diagnostic counts |
 
 ### Each stack

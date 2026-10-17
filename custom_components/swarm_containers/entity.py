@@ -63,7 +63,7 @@ def device_info(coordinator: SwarmContainersCoordinator, kind: str, key: str) ->
     if kind == SWARM:
         return DeviceInfo(
             identifiers={swarm_identifier(entry_id)},
-            name="Swarm",
+            name="Docker Swarm",
             manufacturer="Docker Swarm",
             model=MODEL_SWARM,
             configuration_url=f"{base_url}/#!/{endpoint}/docker/swarm",

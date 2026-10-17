@@ -76,16 +76,16 @@ async def test_entities(hass: HomeAssistant, entry) -> None:
         assert s is not None, entity_id
         return s
 
-    assert state("sensor.swarm_nodes_ready").state == "2"
-    assert state("sensor.swarm_nodes_ready").attributes["leader"] == "pi1"
-    assert state("sensor.swarm_services_running").state == "2"
-    assert state("binary_sensor.swarm_problem").state == "on"
-    assert "Service tools_broken is down" in state("binary_sensor.swarm_problem").attributes["reasons"]
+    assert state("sensor.docker_swarm_nodes_ready").state == "2"
+    assert state("sensor.docker_swarm_nodes_ready").attributes["leader"] == "pi1"
+    assert state("sensor.docker_swarm_services_running").state == "2"
+    assert state("binary_sensor.docker_swarm_problem").state == "on"
+    assert "Service tools_broken is down" in state("binary_sensor.docker_swarm_problem").attributes["reasons"]
     # Version 0.1 entity ids are kept.
     assert state("sensor.pi1_containers").state == "3"
     assert state("sensor.pi1_container_memory").state == "150.0"
     assert state("sensor.pi1_role").state == "manager"
-    assert state("binary_sensor.pi1_online").state == "on"
+    assert state("binary_sensor.pi1_node_ready").state == "on"
     assert state("sensor.stack_web_status").state == "update_paused"
     assert state("sensor.service_web_app_status").attributes["nodes"] == ["pi1", "pi2"]
     assert state("sensor.service_web_app_replicas").state == "2"
@@ -96,7 +96,7 @@ async def test_entities(hass: HomeAssistant, entry) -> None:
 
 async def test_image_check_runs_in_background(hass: HomeAssistant, entry, portainer) -> None:
     await hass.async_block_till_done(wait_background_tasks=True)
-    updates = hass.states.get("sensor.swarm_image_updates")
+    updates = hass.states.get("sensor.docker_swarm_image_updates")
     assert updates.state == "1"
     assert updates.attributes["updates"][0]["name"] == "web_app"
     assert hass.states.get("binary_sensor.service_web_app_image_update").state == "on"
@@ -104,7 +104,7 @@ async def test_image_check_runs_in_background(hass: HomeAssistant, entry, portai
     assert hass.states.get("binary_sensor.service_web_db_image_update").state == "off"
     calls = portainer.get_service_image_status.await_count
     await hass.services.async_call(
-        "button", "press", {"entity_id": "button.swarm_check_for_image_updates"}, blocking=True
+        "button", "press", {"entity_id": "button.docker_swarm_check_for_image_updates"}, blocking=True
     )
     assert portainer.get_service_image_status.await_count == calls + len(fx.SERVICES)
 
@@ -136,4 +136,4 @@ async def test_options_flow(hass: HomeAssistant, entry) -> None:
     )
     await hass.async_block_till_done()
     assert entry.options["image_check"] is False
-    assert hass.states.get("sensor.swarm_image_updates").attributes["enabled"] is False
+    assert hass.states.get("sensor.docker_swarm_image_updates").attributes["enabled"] is False
