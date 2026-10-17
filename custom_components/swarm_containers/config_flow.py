@@ -33,11 +33,17 @@ from .client import (
 from .const import (
     CONF_API_TOKEN,
     CONF_ENDPOINT_ID,
+    CONF_IMAGE_CHECK,
+    CONF_IMAGE_CHECK_INTERVAL,
     CONF_SCAN_INTERVAL,
+    CONF_STANDALONE,
     CONF_VERIFY_SSL,
+    DEFAULT_IMAGE_CHECK_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    MAX_IMAGE_CHECK_INTERVAL,
     MAX_SCAN_INTERVAL,
+    MIN_IMAGE_CHECK_INTERVAL,
     MIN_SCAN_INTERVAL,
 )
 
@@ -48,6 +54,16 @@ _INTERVAL = NumberSelector(
         min=MIN_SCAN_INTERVAL,
         max=MAX_SCAN_INTERVAL,
         step=1,
+        unit_of_measurement="s",
+        mode=NumberSelectorMode.BOX,
+    )
+)
+
+_IMAGE_INTERVAL = NumberSelector(
+    NumberSelectorConfig(
+        min=MIN_IMAGE_CHECK_INTERVAL,
+        max=MAX_IMAGE_CHECK_INTERVAL,
+        step=60,
         unit_of_measurement="s",
         mode=NumberSelectorMode.BOX,
     )
@@ -184,11 +200,30 @@ class SwarmContainersConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class SwarmContainersOptionsFlow(OptionsFlow):
-    """Change how often Portainer is polled."""
+    """Change polling, the image update check and which containers get devices."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
-            return self.async_create_entry(data={CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL])})
-        current = self.config_entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-        schema = vol.Schema({vol.Required(CONF_SCAN_INTERVAL, default=current): _INTERVAL})
+            return self.async_create_entry(
+                data={
+                    CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
+                    CONF_IMAGE_CHECK: bool(user_input[CONF_IMAGE_CHECK]),
+                    CONF_IMAGE_CHECK_INTERVAL: int(user_input[CONF_IMAGE_CHECK_INTERVAL]),
+                    CONF_STANDALONE: bool(user_input[CONF_STANDALONE]),
+                }
+            )
+        options = self.config_entry.options
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_SCAN_INTERVAL, default=options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+                ): _INTERVAL,
+                vol.Required(CONF_IMAGE_CHECK, default=options.get(CONF_IMAGE_CHECK, True)): bool,
+                vol.Required(
+                    CONF_IMAGE_CHECK_INTERVAL,
+                    default=options.get(CONF_IMAGE_CHECK_INTERVAL, DEFAULT_IMAGE_CHECK_INTERVAL),
+                ): _IMAGE_INTERVAL,
+                vol.Required(CONF_STANDALONE, default=options.get(CONF_STANDALONE, True)): bool,
+            }
+        )
         return self.async_show_form(step_id="init", data_schema=schema)
