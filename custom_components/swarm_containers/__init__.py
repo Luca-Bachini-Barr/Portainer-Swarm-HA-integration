@@ -1,16 +1,40 @@
-"""Swarm Containers: per-node container tables from Portainer."""
+"""Swarm Containers: a read-only view of a Docker Swarm through Portainer."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from homeassistant.components.frontend import add_extra_js_url
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.typing import ConfigType
 
+from .const import DOMAIN, FRONTEND_URL, VERSION
 from .coordinator import SwarmContainersCoordinator
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SENSOR]
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 type SwarmContainersConfigEntry = ConfigEntry[SwarmContainersCoordinator]
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Serve the bundled dashboard cards and load them on every page."""
+    await hass.http.async_register_static_paths(
+        [
+            StaticPathConfig(
+                FRONTEND_URL,
+                str(Path(__file__).parent / "frontend" / "swarm-cards.js"),
+                cache_headers=False,
+            )
+        ]
+    )
+    # The version query makes browsers fetch the new file after an update.
+    add_extra_js_url(hass, f"{FRONTEND_URL}?v={VERSION}")
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: SwarmContainersConfigEntry) -> bool:

@@ -1,14 +1,26 @@
-"""Turn Portainer/Docker API responses into per-node container tables.
+"""Turn Portainer/Docker API responses into a swarm snapshot.
 
 Pure functions with no Home Assistant imports so they can be unit tested.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 NO_STACK = "standalone"
 INGRESS_NETWORKS = {"ingress", "host", "bridge", "none"}
+
+# Service states, worst first. The stack and swarm roll-ups take the worst one.
+SERVICE_STATES = ("down", "degraded", "update_paused", "updating", "stopped", "running")
+STACK_STATES = ("down", "degraded", "update_paused", "updating", "stopped", "running")
+
+# Portainer image status values that mean a newer image is available.
+OUTDATED = "outdated"
+
+FAILED_TASK_STATES = {"failed", "rejected"}
+FAILURE_WINDOW = timedelta(hours=24)
+TOP_CONTAINERS = 5
 
 
 def container_name(container: dict[str, Any]) -> str:
@@ -98,39 +110,407 @@ def memory_from_stats(stats: dict[str, Any] | None) -> tuple[float | None, float
     return round(used / 1048576, 1), percent
 
 
+def cpu_sample(stats: dict[str, Any] | None) -> tuple[int, int, int] | None:
+    """Return (container CPU ns, host CPU ns, online CPUs) from a stats sample."""
+    if not stats:
+        return None
+    cpu = stats.get("cpu_stats") or {}
+    total = (cpu.get("cpu_usage") or {}).get("total_usage")
+    system = cpu.get("system_cpu_usage")
+    if total is None or system is None:
+        return None
+    online = cpu.get("online_cpus") or len((cpu.get("cpu_usage") or {}).get("percpu_usage") or []) or 1
+    return int(total), int(system), int(online)
+
+
+def cpu_percent(
+    previous: tuple[int, int, int] | None, current: tuple[int, int, int] | None
+) -> tuple[float | None, float | None]:
+    """Return (docker-style CPU %, share of the whole node %) between two samples.
+
+    One-shot stats carry no previous sample, so CPU use is measured between
+    consecutive polls. Docker-style means 100% is one full core.
+    """
+    if previous is None or current is None:
+        return None, None
+    d_total = current[0] - previous[0]
+    d_system = current[1] - previous[1]
+    if d_total < 0 or d_system <= 0:
+        return None, None
+    node_share = d_total / d_system * 100
+    return round(node_share * current[2], 1), round(node_share, 2)
+
+
+def io_from_stats(stats: dict[str, Any] | None) -> dict[str, int | None]:
+    """Return cumulative network and block I/O byte counters."""
+    if not stats:
+        return {"net_rx": None, "net_tx": None, "disk_read": None, "disk_write": None}
+    networks = stats.get("networks") or {}
+    blkio = (stats.get("blkio_stats") or {}).get("io_service_bytes_recursive") or []
+    return {
+        "net_rx": sum(int(n.get("rx_bytes", 0)) for n in networks.values()) if networks else None,
+        "net_tx": sum(int(n.get("tx_bytes", 0)) for n in networks.values()) if networks else None,
+        "disk_read": sum(int(b.get("value", 0)) for b in blkio if str(b.get("op", "")).lower() == "read"),
+        "disk_write": sum(int(b.get("value", 0)) for b in blkio if str(b.get("op", "")).lower() == "write"),
+    }
+
+
+def parse_time(value: Any) -> datetime | None:
+    """Parse a Docker RFC 3339 timestamp (nanosecond precision) into UTC."""
+    if not value or not isinstance(value, str) or value.startswith("0001-"):
+        return None
+    text = value.rstrip("Z")
+    if "." in text:
+        head, frac = text.split(".", 1)
+        text = f"{head}.{frac[:6]}"
+    try:
+        return datetime.fromisoformat(text).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def node_info(node: dict[str, Any]) -> dict[str, Any]:
+    """Summarise a swarm node object."""
+    desc = node.get("Description") or {}
+    spec = node.get("Spec") or {}
+    status = node.get("Status") or {}
+    manager = node.get("ManagerStatus") or {}
+    resources = desc.get("Resources") or {}
+    address = status.get("Addr")
+    if not address or address == "0.0.0.0":
+        address = str(manager.get("Addr", "")).rsplit(":", 1)[0] or address
+    return {
+        "id": node.get("ID", ""),
+        "hostname": desc.get("Hostname") or node.get("ID", "unknown")[:12],
+        "role": spec.get("Role", "unknown"),
+        "availability": spec.get("Availability", "unknown"),
+        "state": status.get("State", "unknown"),
+        "leader": bool(manager.get("Leader")),
+        "reachability": manager.get("Reachability"),
+        "address": address,
+        "engine_version": (desc.get("Engine") or {}).get("EngineVersion"),
+        "os": (desc.get("Platform") or {}).get("OS"),
+        "architecture": (desc.get("Platform") or {}).get("Architecture"),
+        "cpus": round((resources.get("NanoCPUs") or 0) / 1e9, 2) or None,
+        "memory_total_mib": round((resources.get("MemoryBytes") or 0) / 1048576, 1) or None,
+    }
+
+
+def service_state(running: int, desired: int, update_state: str | None) -> str:
+    """Return one of SERVICE_STATES."""
+    if desired == 0:
+        return "stopped"
+    if running == 0:
+        return "down"
+    if running < desired:
+        return "degraded"
+    if update_state == "paused" or update_state == "rollback_paused":
+        return "update_paused"
+    if update_state in ("updating", "rollback_started"):
+        return "updating"
+    return "running"
+
+
+def worst(states: list[str], order: tuple[str, ...]) -> str | None:
+    """Return the worst state in ``states`` according to ``order``."""
+    present = [s for s in order if s in states]
+    return present[0] if present else None
+
+
+def _container_row(
+    container: dict[str, Any],
+    stats: dict[str, Any] | None,
+    cpu: tuple[float | None, float | None],
+) -> dict[str, Any]:
+    labels = container.get("Labels") or {}
+    mem_mib, mem_pct = memory_from_stats(stats)
+    ip, networks = addresses(container)
+    return {
+        "name": container_name(container),
+        "stack": labels.get("com.docker.stack.namespace") or NO_STACK,
+        "service": labels.get("com.docker.swarm.service.name"),
+        "image": short_image(container.get("Image", "")),
+        "health": health_state(container),
+        "state": container.get("State", "unknown"),
+        "uptime": uptime_text(container),
+        "memory_mib": mem_mib,
+        "memory_percent": mem_pct,
+        "cpu_percent": cpu[0],
+        "cpu_node_percent": cpu[1],
+        "ip": ip,
+        "networks": networks,
+        "id": str(container.get("Id", ""))[:12],
+        **io_from_stats(stats),
+    }
+
+
+def _sum(values: list[float | None]) -> float | None:
+    real = [v for v in values if v is not None]
+    return round(sum(real), 1) if real else None
+
+
+def build_snapshot(
+    *,
+    containers: list[dict[str, Any]],
+    stats_by_id: dict[str, dict[str, Any] | None],
+    previous_cpu: dict[str, tuple[int, int, int]],
+    nodes: list[dict[str, Any]] | None = None,
+    services: list[dict[str, Any]] | None = None,
+    tasks: list[dict[str, Any]] | None = None,
+    portainer_stacks: list[dict[str, Any]] | None = None,
+    resource_counts: dict[str, dict[str, int]] | None = None,
+    image_status: dict[str, str] | None = None,
+    image_checked: datetime | None = None,
+    now: datetime | None = None,
+) -> tuple[dict[str, Any], dict[str, tuple[int, int, int]]]:
+    """Build the whole swarm snapshot.
+
+    Returns (snapshot, cpu samples to keep for the next poll). ``snapshot["nodes"]``
+    keeps the original per-node table shape so existing dashboards continue to
+    work; the rest of the snapshot is swarm-wide.
+    """
+    now = now or datetime.now(timezone.utc)
+    nodes = nodes or []
+    services = services or []
+    tasks = tasks or []
+    portainer_stacks = portainer_stacks or []
+    resource_counts = resource_counts or {}
+    image_status = image_status or {}
+
+    node_by_id = {n.get("ID"): node_info(n) for n in nodes}
+    node_by_name = {info["hostname"]: info for info in node_by_id.values()}
+
+    # Containers: one row each, with CPU measured against the previous poll.
+    new_cpu: dict[str, tuple[int, int, int]] = {}
+    rows_by_node: dict[str, list[dict[str, Any]]] = {}
+    row_by_task: dict[str, dict[str, Any]] = {}
+    standalone: dict[str, dict[str, Any]] = {}
+    for container in containers:
+        cid = str(container.get("Id", ""))
+        stats = stats_by_id.get(cid)
+        sample = cpu_sample(stats)
+        if sample is not None:
+            new_cpu[cid] = sample
+        row = _container_row(container, stats, cpu_percent(previous_cpu.get(cid), sample))
+        node = node_name(container)
+        row["node"] = node
+        rows_by_node.setdefault(node, []).append(row)
+        labels = container.get("Labels") or {}
+        task_id = labels.get("com.docker.swarm.task.id")
+        if task_id:
+            row_by_task[task_id] = row
+        else:
+            key = f"{node}/{row['name']}"
+            row["update"] = image_status.get(f"container:{cid}")
+            row["full_id"] = cid
+            standalone[key] = {**row, "key": key}
+
+    # Per-node tables (original shape) plus node details.
+    node_tables: dict[str, Any] = {}
+    for name in set(rows_by_node) | set(node_by_name):
+        rows = rows_by_node.get(name, [])
+        rows.sort(key=lambda r: (r["stack"] == NO_STACK, r["stack"], r["name"]))
+        info = node_by_name.get(name, {"hostname": name})
+        memory = round(sum(r["memory_mib"] or 0 for r in rows), 1)
+        cpu_values = [r["cpu_node_percent"] for r in rows if r["state"] == "running"]
+        node_cpu = round(sum(v for v in cpu_values if v is not None), 1) if any(
+            v is not None for v in cpu_values
+        ) else None
+        total_mem = info.get("memory_total_mib")
+        running_rows = [r for r in rows if r["state"] == "running"]
+        top = sorted(
+            (r for r in running_rows if r["cpu_percent"] is not None),
+            key=lambda r: r["cpu_percent"],
+            reverse=True,
+        )[:TOP_CONTAINERS]
+        node_tables[name] = {
+            "containers": rows,
+            "total": len(rows),
+            "running": len(running_rows),
+            "stopped": len(rows) - len(running_rows),
+            "unhealthy": sum(r["health"] == "unhealthy" for r in rows),
+            "memory_mib": memory,
+            "memory_percent": round(memory / total_mem * 100, 1) if total_mem else None,
+            "cpu_percent": node_cpu,
+            "top": [
+                {"name": r["name"], "cpu_percent": r["cpu_percent"], "memory_mib": r["memory_mib"]}
+                for r in top
+            ],
+            "info": info,
+            "counts": resource_counts.get(name, {}),
+            "tasks": 0,
+        }
+
+    # Services from their tasks.
+    service_rows: dict[str, dict[str, Any]] = {}
+    tasks_by_service: dict[str, list[dict[str, Any]]] = {}
+    for task in tasks:
+        tasks_by_service.setdefault(task.get("ServiceID", ""), []).append(task)
+
+    for service in services:
+        spec = service.get("Spec") or {}
+        name = spec.get("Name") or service.get("ID", "")[:12]
+        labels = spec.get("Labels") or {}
+        mode = spec.get("Mode") or {}
+        status = service.get("ServiceStatus") or {}
+        sid = service.get("ID", "")
+        own_tasks = tasks_by_service.get(sid, [])
+        live = [
+            t for t in own_tasks
+            if t.get("DesiredState") == "running" and (t.get("Status") or {}).get("State") == "running"
+        ]
+        if "Global" in mode:
+            mode_name = "global"
+            desired = int(status.get("DesiredTasks", len({t.get("NodeID") for t in own_tasks if t.get("DesiredState") == "running"})))
+        else:
+            mode_name = "replicated"
+            desired = int(((mode.get("Replicated") or {}).get("Replicas")) or status.get("DesiredTasks") or 0)
+        running = int(status.get("RunningTasks", len(live)))
+        update = service.get("UpdateStatus") or {}
+        update_state = update.get("State")
+        state = service_state(running, desired, update_state)
+        failures = []
+        for task in own_tasks:
+            task_status = task.get("Status") or {}
+            if task_status.get("State") in FAILED_TASK_STATES:
+                when = parse_time(task_status.get("Timestamp"))
+                if when and now - when <= FAILURE_WINDOW:
+                    failures.append(
+                        {
+                            "node": node_by_id.get(task.get("NodeID"), {}).get("hostname"),
+                            "state": task_status.get("State"),
+                            "error": task_status.get("Err") or task_status.get("Message"),
+                            "when": _iso(when),
+                        }
+                    )
+        failures.sort(key=lambda f: f["when"] or "", reverse=True)
+        task_rows = []
+        for task in sorted(live, key=lambda t: t.get("Slot") or 0):
+            node = node_by_id.get(task.get("NodeID"), {}).get("hostname", "unknown")
+            row = row_by_task.get(task.get("ID", ""), {})
+            task_rows.append(
+                {
+                    "slot": task.get("Slot"),
+                    "node": node,
+                    "since": _iso(parse_time((task.get("Status") or {}).get("Timestamp"))),
+                    "health": row.get("health"),
+                    "cpu_percent": row.get("cpu_percent"),
+                    "memory_mib": row.get("memory_mib"),
+                    "ip": row.get("ip"),
+                    "container": row.get("id"),
+                }
+            )
+            if node in node_tables:
+                node_tables[node]["tasks"] += 1
+        container_spec = (spec.get("TaskTemplate") or {}).get("ContainerSpec") or {}
+        ports = [
+            f"{p.get('PublishedPort')}:{p.get('TargetPort')}/{p.get('Protocol', 'tcp')}"
+            for p in ((service.get("Endpoint") or {}).get("Ports") or [])
+            if p.get("PublishedPort")
+        ]
+        service_rows[name] = {
+            "id": sid,
+            "name": name,
+            "stack": labels.get("com.docker.stack.namespace") or NO_STACK,
+            "image": short_image(container_spec.get("Image", "")),
+            "mode": mode_name,
+            "desired": desired,
+            "running": running,
+            "state": state,
+            "update_state": update_state,
+            "update_message": update.get("Message"),
+            "nodes": sorted({t["node"] for t in task_rows}),
+            "tasks": task_rows,
+            "unhealthy": sum(t["health"] == "unhealthy" for t in task_rows),
+            "cpu_percent": _sum([t["cpu_percent"] for t in task_rows]),
+            "memory_mib": _sum([t["memory_mib"] for t in task_rows]),
+            "constraints": ((spec.get("TaskTemplate") or {}).get("Placement") or {}).get("Constraints") or [],
+            "ports": ports,
+            "failures_24h": len(failures),
+            "last_failure": failures[0] if failures else None,
+            "created": _iso(parse_time(service.get("CreatedAt"))),
+            "updated": _iso(parse_time(service.get("UpdatedAt"))),
+            "update": image_status.get(f"service:{sid}"),
+        }
+
+    # Stacks: every stack namespace with services, plus Portainer stacks with none.
+    portainer_by_name = {str(s.get("Name")): s for s in portainer_stacks if s.get("Name")}
+    stacks: dict[str, dict[str, Any]] = {}
+    for svc in service_rows.values():
+        if svc["stack"] == NO_STACK:
+            continue
+        stacks.setdefault(svc["stack"], {"services": []})["services"].append(svc["name"])
+    for name in portainer_by_name:
+        stacks.setdefault(name, {"services": []})
+    for name, stack in stacks.items():
+        members = [service_rows[s] for s in sorted(stack["services"])]
+        portainer = portainer_by_name.get(name)
+        updated = None
+        if portainer and portainer.get("UpdateDate"):
+            updated = datetime.fromtimestamp(int(portainer["UpdateDate"]), timezone.utc)
+        stack.update(
+            {
+                "name": name,
+                "state": worst([m["state"] for m in members], STACK_STATES) or "stopped",
+                "services": [m["name"] for m in members],
+                "services_running": sum(m["state"] in ("running", "updating", "update_paused") for m in members),
+                "containers": sum(m["running"] for m in members),
+                "desired": sum(m["desired"] for m in members),
+                "nodes": sorted({n for m in members for n in m["nodes"]}),
+                "updates": sorted(m["name"] for m in members if m["update"] == OUTDATED),
+                "unhealthy": sum(m["unhealthy"] for m in members),
+                "failures_24h": sum(m["failures_24h"] for m in members),
+                "cpu_percent": _sum([m["cpu_percent"] for m in members]),
+                "memory_mib": _sum([m["memory_mib"] for m in members]),
+                "portainer_id": portainer.get("Id") if portainer else None,
+                "managed": portainer is not None,
+                "git": bool(portainer and portainer.get("GitConfig")),
+                "updated": _iso(updated),
+            }
+        )
+
+    updates = [
+        {"kind": "service", "name": s["name"], "stack": s["stack"], "image": s["image"], "nodes": s["nodes"]}
+        for s in service_rows.values()
+        if s["update"] == OUTDATED
+    ] + [
+        {"kind": "container", "name": c["name"], "stack": c["stack"], "image": c["image"], "nodes": [c["node"]]}
+        for c in standalone.values()
+        if c["update"] == OUTDATED
+    ]
+    updates.sort(key=lambda u: (u["stack"], u["name"]))
+
+    node_infos = [t["info"] for t in node_tables.values() if t["info"].get("role")]
+    problems = [s["name"] for s in service_rows.values() if s["state"] in ("down", "degraded", "update_paused")]
+    snapshot = {
+        "nodes": node_tables,
+        "nodes_total": len(node_infos),
+        "nodes_ready": sum(i.get("state") == "ready" for i in node_infos),
+        "managers": sum(i.get("role") == "manager" for i in node_infos),
+        "leader": next((i["hostname"] for i in node_infos if i.get("leader")), None),
+        "services": service_rows,
+        "services_total": len(service_rows),
+        "services_running": sum(s["state"] in ("running", "updating") for s in service_rows.values()),
+        "problem_services": sorted(problems),
+        "stacks": stacks,
+        "standalone": standalone,
+        "updates": updates,
+        "updates_checked": _iso(image_checked),
+        "tasks_running": sum(s["running"] for s in service_rows.values()),
+        "failures_24h": sum(s["failures_24h"] for s in service_rows.values()),
+        "unhealthy": sum(t["unhealthy"] for t in node_tables.values()),
+    }
+    return snapshot, new_cpu
+
+
 def build_tables(
     containers: list[dict[str, Any]],
     stats_by_id: dict[str, dict[str, Any] | None],
 ) -> dict[str, Any]:
-    """Group containers by node and build display rows plus totals."""
-    nodes: dict[str, list[dict[str, Any]]] = {}
-    for container in containers:
-        mem_mib, mem_pct = memory_from_stats(stats_by_id.get(container.get("Id", "")))
-        ip, networks = addresses(container)
-        labels = container.get("Labels") or {}
-        nodes.setdefault(node_name(container), []).append(
-            {
-                "name": container_name(container),
-                "stack": labels.get("com.docker.stack.namespace") or NO_STACK,
-                "image": short_image(container.get("Image", "")),
-                "health": health_state(container),
-                "state": container.get("State", "unknown"),
-                "uptime": uptime_text(container),
-                "memory_mib": mem_mib,
-                "memory_percent": mem_pct,
-                "ip": ip,
-                "networks": networks,
-                "id": str(container.get("Id", ""))[:12],
-            }
-        )
-    result: dict[str, Any] = {}
-    for name, rows in nodes.items():
-        rows.sort(key=lambda r: (r["stack"] == NO_STACK, r["stack"], r["name"]))
-        result[name] = {
-            "containers": rows,
-            "total": len(rows),
-            "running": sum(r["state"] == "running" for r in rows),
-            "unhealthy": sum(r["health"] == "unhealthy" for r in rows),
-            "memory_mib": round(sum(r["memory_mib"] or 0 for r in rows), 1),
-        }
-    return result
+    """Group containers by node (kept for callers that only need the tables)."""
+    snapshot, _ = build_snapshot(containers=containers, stats_by_id=stats_by_id, previous_cpu={})
+    return snapshot["nodes"]
