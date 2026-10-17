@@ -6,7 +6,7 @@
  * already has; they never talk to Portainer.
  */
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 const PLATFORM = "swarm_containers";
 const MODEL = {
   swarm: "Swarm",
@@ -188,11 +188,13 @@ class SwarmBaseCard extends HTMLElement {
     if (!config) throw new Error("Invalid configuration");
     this._config = { ...config };
     this._sig = "";
-    if (this._hass) this._render();
+    if (this._hass) this.hass = this._hass;
   }
 
   set hass(hass) {
     this._hass = hass;
+    // Home Assistant can set hass before setConfig; setConfig renders once both are known.
+    if (!this._config) return;
     this._model = buildModel(hass);
     const ids = this._watched();
     const sig = ids.map((id) => {
