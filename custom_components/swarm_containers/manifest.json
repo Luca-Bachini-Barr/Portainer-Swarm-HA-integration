@@ -1,0 +1,12 @@
+{
+  "domain": "swarm_containers",
+  "name": "Swarm Containers",
+  "codeowners": ["@Luca-Bachini-Barr"],
+  "config_flow": true,
+  "documentation": "https://github.com/Luca-Bachini-Barr/Portainer-Swarm-HA-integration",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Luca-Bachini-Barr/Portainer-Swarm-HA-integration/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
