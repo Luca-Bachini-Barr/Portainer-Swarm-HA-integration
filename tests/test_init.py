@@ -66,8 +66,28 @@ async def entry(hass: HomeAssistant, portainer) -> MockConfigEntry:
     with patch("custom_components.swarm_containers.add_extra_js_url") as add_js:
         assert await hass.config_entries.async_setup(config_entry.entry_id)
         await hass.async_block_till_done()
+    # No dashboard resource store in the test, so the cards load on every page instead.
     add_js.assert_called_once()
     return config_entry
+
+
+class FakeResources:
+    """Just enough of Home Assistant's dashboard resource collection."""
+
+    def __init__(self, items):
+        self.items = items
+
+    async def async_get_info(self):
+        return {"resources": len(self.items)}
+
+    def async_items(self):
+        return self.items
+
+    async def async_create_item(self, data):
+        self.items.append({"id": "new", "type": data["res_type"], "url": data["url"]})
+
+    async def async_update_item(self, item_id, data):
+        next(i for i in self.items if i["id"] == item_id)["url"] = data["url"]
 
 
 async def test_entities(hass: HomeAssistant, entry) -> None:
@@ -152,3 +172,27 @@ async def test_device_hierarchy(hass: HomeAssistant, entry) -> None:
     assert devices[f"{prefix}stack_web"].via_device_id == swarm.id
     assert devices[f"{prefix}service_web_app"].via_device_id == devices[f"{prefix}stack_web"].id
     assert devices[f"{prefix}container_pi2/glances"].via_device_id == devices[f"{prefix}pi2"].id
+
+
+@pytest.mark.parametrize(
+    ("existing", "expected"),
+    [
+        ([], ["/swarm_containers/swarm-cards.js?v={v}"]),
+        ([{"id": "a", "type": "module", "url": "/swarm_containers/swarm-cards.js?v=0.0.1"}], ["/swarm_containers/swarm-cards.js?v={v}"]),
+        (
+            [{"id": "a", "type": "module", "url": "/hacsfiles/other.js"}],
+            ["/hacsfiles/other.js", "/swarm_containers/swarm-cards.js?v={v}"],
+        ),
+    ],
+)
+async def test_cards_registered_as_dashboard_resource(hass: HomeAssistant, existing, expected) -> None:
+    from custom_components.swarm_containers import _async_register_cards
+    from custom_components.swarm_containers.const import VERSION
+
+    resources = FakeResources(list(existing))
+    hass.data["lovelace"] = MagicMock(resources=resources)
+    with patch("custom_components.swarm_containers.add_extra_js_url") as add_js:
+        await _async_register_cards(hass)
+        await _async_register_cards(hass)  # a second start changes nothing
+    add_js.assert_not_called()
+    assert [i["url"] for i in resources.items] == [u.format(v=VERSION) for u in expected]

@@ -1,12 +1,12 @@
 /*
  * Swarm Containers dashboard cards.
  *
- * Served by the swarm_containers integration and loaded on every page, so no
- * dashboard resource is needed. The cards only read entities Home Assistant
- * already has; they never talk to Portainer.
+ * Served by the swarm_containers integration, which registers this file as a
+ * dashboard resource. The cards only read entities Home Assistant already has;
+ * they never talk to Portainer.
  */
 
-const VERSION = "0.2.1";
+const VERSION = "0.2.2";
 const PLATFORM = "swarm_containers";
 const MODEL = {
   swarm: "Swarm",
@@ -246,7 +246,7 @@ class SwarmBaseCard extends HTMLElement {
   }
 
   getGridOptions() {
-    return { columns: 12, min_columns: 6 };
+    return { columns: "full", min_columns: 6 };
   }
 }
 
