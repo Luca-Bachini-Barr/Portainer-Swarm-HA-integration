@@ -1,0 +1,49 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Portainer",
+        "description": "Read-only. Use a Portainer access token (My account > Access tokens).",
+        "data": {
+          "url": "Portainer URL",
+          "api_token": "API token",
+          "verify_ssl": "Verify SSL certificate",
+          "scan_interval": "Update interval (seconds)"
+        }
+      },
+      "endpoint": {
+        "title": "Choose the swarm environment",
+        "data": { "endpoint_id": "Environment" }
+      },
+      "reauth_confirm": {
+        "title": "Portainer token rejected",
+        "description": "Enter a new Portainer access token.",
+        "data": { "api_token": "API token" }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach Portainer at that URL",
+      "invalid_auth": "Portainer rejected the API token",
+      "no_endpoints": "Portainer has no environments that are up",
+      "unknown": "Unexpected error, check the Home Assistant log"
+    },
+    "abort": {
+      "already_configured": "This Portainer environment is already set up",
+      "reauth_successful": "The token was updated"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Swarm Containers options",
+        "data": { "scan_interval": "Update interval (seconds)" }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "containers": { "name": "Containers" },
+      "container_memory": { "name": "Container memory" }
+    }
+  }
+}
