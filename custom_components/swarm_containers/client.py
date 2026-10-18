@@ -6,7 +6,7 @@ from typing import Any
 
 import aiohttp
 
-from .const import REQUEST_TIMEOUT
+from .const import IMAGE_CHECK_TIMEOUT, REQUEST_TIMEOUT
 
 
 class PortainerError(Exception):
@@ -36,13 +36,18 @@ class PortainerClient:
     def __repr__(self) -> str:
         return f"PortainerClient(base_url={self._base_url!r})"
 
-    async def _get(self, path: str, extra_headers: dict[str, str] | None = None) -> Any:
+    async def _get(
+        self,
+        path: str,
+        extra_headers: dict[str, str] | None = None,
+        timeout: float = REQUEST_TIMEOUT,
+    ) -> Any:
         headers = {"X-API-Key": self._api_token, **(extra_headers or {})}
         try:
             async with self._session.get(
                 f"{self._base_url}{path}",
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+                timeout=aiohttp.ClientTimeout(total=timeout),
             ) as response:
                 if response.status in (401, 403):
                     raise PortainerAuthError("Portainer rejected the API token")
@@ -70,6 +75,59 @@ class PortainerClient:
         if not isinstance(data, list):
             raise PortainerResponseError("Unexpected endpoints response")
         return [e for e in data if isinstance(e, dict) and "Id" in e and e.get("Status") == 1]
+
+    async def _get_list(self, path: str, key: str | None = None) -> list[dict[str, Any]]:
+        data = await self._get(path)
+        if key is not None and isinstance(data, dict):
+            data = data.get(key)
+        if not isinstance(data, list):
+            raise PortainerResponseError(f"Unexpected response from {path.split('?')[0]}")
+        return [item for item in data if isinstance(item, dict)]
+
+    async def get_nodes(self, endpoint_id: int) -> list[dict[str, Any]]:
+        """Return the swarm nodes."""
+        return await self._get_list(f"/api/endpoints/{endpoint_id}/docker/nodes")
+
+    async def get_services(self, endpoint_id: int) -> list[dict[str, Any]]:
+        """Return the swarm services with their running/desired task counts."""
+        return await self._get_list(f"/api/endpoints/{endpoint_id}/docker/services?status=true")
+
+    async def get_tasks(self, endpoint_id: int) -> list[dict[str, Any]]:
+        """Return the swarm tasks, including recently finished and failed ones."""
+        return await self._get_list(f"/api/endpoints/{endpoint_id}/docker/tasks")
+
+    async def get_stacks(self) -> list[dict[str, Any]]:
+        """Return the stacks Portainer manages."""
+        return await self._get_list("/api/stacks")
+
+    async def get_images(self, endpoint_id: int) -> list[dict[str, Any]]:
+        """Return images on every node (each tagged with its node by the agent)."""
+        return await self._get_list(f"/api/endpoints/{endpoint_id}/docker/images/json")
+
+    async def get_volumes(self, endpoint_id: int) -> list[dict[str, Any]]:
+        """Return volumes on every node."""
+        return await self._get_list(f"/api/endpoints/{endpoint_id}/docker/volumes", "Volumes")
+
+    async def get_networks(self, endpoint_id: int) -> list[dict[str, Any]]:
+        """Return networks on every node."""
+        return await self._get_list(f"/api/endpoints/{endpoint_id}/docker/networks")
+
+    async def get_service_image_status(self, endpoint_id: int, service_id: str) -> str:
+        """Return Portainer's registry check for a service image (e.g. updated/outdated)."""
+        data = await self._get(
+            f"/api/docker/{endpoint_id}/services/{service_id}/image_status",
+            timeout=IMAGE_CHECK_TIMEOUT,
+        )
+        return str((data or {}).get("Status") or "unknown")
+
+    async def get_container_image_status(self, endpoint_id: int, container_id: str, node: str) -> str:
+        """Return Portainer's registry check for a standalone container's image."""
+        data = await self._get(
+            f"/api/docker/{endpoint_id}/containers/{container_id}/image_status",
+            {"X-PortainerAgent-Target": node},
+            IMAGE_CHECK_TIMEOUT,
+        )
+        return str((data or {}).get("Status") or "unknown")
 
     async def get_containers(self, endpoint_id: int) -> list[dict[str, Any]]:
         """Return every container the environment reports, across all swarm nodes."""

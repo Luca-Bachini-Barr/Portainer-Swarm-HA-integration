@@ -13,12 +13,16 @@
       },
       "endpoint": {
         "title": "Choose the swarm environment",
-        "data": { "endpoint_id": "Environment" }
+        "data": {
+          "endpoint_id": "Environment"
+        }
       },
       "reauth_confirm": {
         "title": "Portainer token rejected",
         "description": "Enter a new Portainer access token.",
-        "data": { "api_token": "API token" }
+        "data": {
+          "api_token": "API token"
+        }
       }
     },
     "error": {
@@ -36,14 +40,143 @@
     "step": {
       "init": {
         "title": "Swarm Containers options",
-        "data": { "scan_interval": "Update interval (seconds)" }
+        "data": {
+          "scan_interval": "Update interval (seconds)",
+          "image_check": "Check for image updates",
+          "image_check_interval": "Image check interval (seconds)",
+          "standalone_containers": "Create devices for standalone containers"
+        },
+        "data_description": {
+          "image_check": "Asks Portainer to compare each running image with its registry. Read-only; nothing is pulled.",
+          "image_check_interval": "Each check queries the registry once per image, so keep this infrequent.",
+          "standalone_containers": "Containers on the nodes that are not part of a swarm service, such as ones started with docker run or compose."
+        }
       }
     }
   },
   "entity": {
     "sensor": {
-      "containers": { "name": "Containers" },
-      "container_memory": { "name": "Container memory" }
+      "containers": {
+        "name": "Containers"
+      },
+      "container_memory": {
+        "name": "Container memory"
+      },
+      "container_memory_percent": {
+        "name": "Container memory usage"
+      },
+      "container_cpu": {
+        "name": "Container CPU"
+      },
+      "tasks": {
+        "name": "Tasks"
+      },
+      "role": {
+        "name": "Role",
+        "state": {
+          "manager": "Manager",
+          "worker": "Worker",
+          "unknown": "Unknown"
+        }
+      },
+      "images": {
+        "name": "Images"
+      },
+      "volumes": {
+        "name": "Volumes"
+      },
+      "networks": {
+        "name": "Networks"
+      },
+      "nodes_ready": {
+        "name": "Nodes ready"
+      },
+      "services_running": {
+        "name": "Services running"
+      },
+      "stacks": {
+        "name": "Stacks"
+      },
+      "tasks_running": {
+        "name": "Tasks running"
+      },
+      "updates_available": {
+        "name": "Image updates"
+      },
+      "task_failures": {
+        "name": "Task failures (24h)"
+      },
+      "stack_status": {
+        "name": "Status",
+        "state": {
+          "running": "Running",
+          "degraded": "Degraded",
+          "down": "Down",
+          "stopped": "Stopped",
+          "updating": "Updating",
+          "update_paused": "Update paused"
+        }
+      },
+      "stack_containers": {
+        "name": "Containers"
+      },
+      "service_status": {
+        "name": "Status",
+        "state": {
+          "running": "Running",
+          "degraded": "Degraded",
+          "down": "Down",
+          "stopped": "Stopped",
+          "updating": "Updating",
+          "update_paused": "Update paused"
+        }
+      },
+      "replicas": {
+        "name": "Replicas"
+      },
+      "cpu": {
+        "name": "CPU"
+      },
+      "memory": {
+        "name": "Memory"
+      },
+      "container_state": {
+        "name": "State",
+        "state": {
+          "created": "Created",
+          "running": "Running",
+          "paused": "Paused",
+          "restarting": "Restarting",
+          "removing": "Removing",
+          "exited": "Exited",
+          "dead": "Dead"
+        }
+      },
+      "health": {
+        "name": "Health",
+        "state": {
+          "healthy": "Healthy",
+          "unhealthy": "Unhealthy",
+          "starting": "Starting",
+          "none": "No health check"
+        }
+      }
+    },
+    "binary_sensor": {
+      "swarm_problem": {
+        "name": "Problem"
+      },
+      "online": {
+        "name": "Node ready"
+      },
+      "update_available": {
+        "name": "Image update"
+      }
+    },
+    "button": {
+      "check_updates": {
+        "name": "Check for image updates"
+      }
     }
   }
 }
