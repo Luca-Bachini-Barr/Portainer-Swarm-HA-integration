@@ -205,3 +205,28 @@ def test_cpu_and_memory_roll_up_between_polls():
     assert snap["nodes"]["pi1"]["top"][0]["cpu_percent"] == 40.0
     row = snap["nodes"]["pi1"]["containers"][0]
     assert (row["net_rx"], row["disk_write"]) == (10, 7)
+
+
+def test_exited_task_containers_are_task_history():
+    old = fx.container("d1" * 32, "web_app.1.old", "pi1", "t_old", "web_app", "web", health="unhealthy")
+    old["State"] = "exited"
+    old["Status"] = "Exited (137) 6 hours ago"
+    snap, _ = parse.build_snapshot(
+        containers=[*fx.CONTAINERS, old], stats_by_id={}, previous_cpu={}, nodes=fx.NODES,
+        services=fx.SERVICES, tasks=fx.TASKS, now=fx.NOW,
+    )
+    pi1 = snap["nodes"]["pi1"]
+    assert pi1["total"] == 3 and pi1["stopped"] == 0
+    assert snap["unhealthy"] == 1  # only the running web_db container
+
+
+def test_stopped_standalone_container_is_kept_but_not_unhealthy():
+    stopped = fx.container("e1" * 32, "old_tool", "pi2", health="unhealthy")
+    stopped["State"] = "exited"
+    snap, _ = parse.build_snapshot(
+        containers=[*fx.CONTAINERS, stopped], stats_by_id={}, previous_cpu={}, nodes=fx.NODES,
+        services=fx.SERVICES, tasks=fx.TASKS, now=fx.NOW,
+    )
+    assert "pi2/old_tool" in snap["standalone"]
+    assert snap["nodes"]["pi2"]["stopped"] == 1
+    assert snap["nodes"]["pi2"]["unhealthy"] == 0
