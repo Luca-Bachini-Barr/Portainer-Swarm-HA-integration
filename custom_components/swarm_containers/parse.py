@@ -290,6 +290,12 @@ def build_snapshot(
     row_by_task: dict[str, dict[str, Any]] = {}
     standalone: dict[str, dict[str, Any]] = {}
     for container in containers:
+        labels = container.get("Labels") or {}
+        task_id = labels.get("com.docker.swarm.task.id")
+        if task_id and container.get("State") != "running":
+            # Exited containers of replaced swarm tasks (Docker keeps a few per slot as
+            # task history). The tasks themselves are counted as failures if they failed.
+            continue
         cid = str(container.get("Id", ""))
         stats = stats_by_id.get(cid)
         sample = cpu_sample(stats)
@@ -299,8 +305,6 @@ def build_snapshot(
         node = node_name(container)
         row["node"] = node
         rows_by_node.setdefault(node, []).append(row)
-        labels = container.get("Labels") or {}
-        task_id = labels.get("com.docker.swarm.task.id")
         if task_id:
             row_by_task[task_id] = row
         else:
@@ -332,7 +336,8 @@ def build_snapshot(
             "total": len(rows),
             "running": len(running_rows),
             "stopped": len(rows) - len(running_rows),
-            "unhealthy": sum(r["health"] == "unhealthy" for r in rows),
+            # A stopped container keeps its last health status, so only running ones count.
+            "unhealthy": sum(r["health"] == "unhealthy" for r in running_rows),
             "memory_mib": memory,
             "memory_percent": round(memory / total_mem * 100, 1) if total_mem else None,
             "cpu_percent": node_cpu,
