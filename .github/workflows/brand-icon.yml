@@ -1,0 +1,30 @@
+name: Decode brand icon (one-off)
+
+on:
+  push:
+    branches: [brand-icon]
+    paths: ["brand-src/*.b64"]
+
+permissions:
+  contents: write
+
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decode PNGs and commit
+        run: |
+          set -euo pipefail
+          dest=custom_components/swarm_containers/brand
+          mkdir -p "$dest"
+          base64 -d brand-src/icon.png.b64 > "$dest/icon.png"
+          base64 -d brand-src/icon@2x.png.b64 > "$dest/icon@2x.png"
+          sha256sum "$dest"/*.png
+          file "$dest"/*.png
+          git rm -q -r brand-src
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$dest"
+          git commit -m "Add brand icon (decoded from base64)"
+          git push
