@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "swarm_containers"
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 
 CONF_API_TOKEN = "api_token"
 CONF_ENDPOINT_ID = "endpoint_id"
