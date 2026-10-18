@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-NOW = datetime(2026, 10, 17, 12, 0, tzinfo=timezone.utc)
+# Relative to the real clock: the integration counts failures against the current time.
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 MIB = 1048576
 
 
