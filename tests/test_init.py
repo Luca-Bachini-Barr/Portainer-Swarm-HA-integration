@@ -196,3 +196,124 @@ async def test_cards_registered_as_dashboard_resource(hass: HomeAssistant, exist
         await _async_register_cards(hass)  # a second start changes nothing
     add_js.assert_not_called()
     assert [i["url"] for i in resources.items] == [u.format(v=VERSION) for u in expected]
+
+
+@pytest.fixture
+def host_portainer():
+    """A mocked Portainer whose environment is a single Docker host, not a swarm."""
+    from custom_components.swarm_containers.client import PortainerResponseError
+
+    def not_swarm(_endpoint):
+        raise PortainerResponseError("Portainer returned HTTP 503", 503)
+
+    client = MagicMock()
+    client.data = {"containers": copy.deepcopy(fx.HOST_CONTAINERS)}
+    client.get_containers = AsyncMock(side_effect=lambda _e: client.data["containers"])
+    client.get_nodes = AsyncMock(side_effect=not_swarm)
+    client.get_services = AsyncMock(side_effect=not_swarm)
+    client.get_tasks = AsyncMock(side_effect=not_swarm)
+    client.get_stacks = AsyncMock(return_value=fx.HOST_STACKS)
+    client.get_endpoint = AsyncMock(return_value={"Id": 1, "Name": "NAS"})
+    client.get_info = AsyncMock(return_value=fx.HOST_INFO)
+    client.get_images = AsyncMock(return_value=[{"Id": "i1"}, {"Id": "i2"}])
+    client.get_volumes = AsyncMock(return_value=[])
+    client.get_networks = AsyncMock(return_value=[])
+    client.get_stats = AsyncMock(return_value=fx.stats(0, 0, 40))
+
+    def no_image_check(*_args):
+        # Portainer Community Edition has no image_status route.
+        raise PortainerResponseError("Portainer returned HTTP 404", 404)
+
+    client.get_service_image_status = AsyncMock(side_effect=no_image_check)
+    client.get_container_image_status = AsyncMock(side_effect=no_image_check)
+    with patch(CLIENT, return_value=client):
+        yield client
+
+
+@pytest.fixture
+async def host_entry(hass: HomeAssistant, host_portainer) -> MockConfigEntry:
+    hass.config.components.update({"frontend", "http"})
+    hass.http = MagicMock(async_register_static_paths=AsyncMock())
+    config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Swarm containers (NAS)",
+        unique_id="instance#nas",
+        data={"url": "https://portainer:9443", "api_token": "x", "verify_ssl": False, "endpoint_id": "1"},
+        options={"scan_interval": 60},
+    )
+    config_entry.add_to_hass(hass)
+    with patch("custom_components.swarm_containers.add_extra_js_url"):
+        assert await hass.config_entries.async_setup(config_entry.entry_id)
+        await hass.async_block_till_done()
+    return config_entry
+
+
+async def test_single_host_entities(hass: HomeAssistant, host_entry) -> None:
+    assert host_entry.state.value == "loaded"
+    assert hass.states.get("sensor.docker_nas_stacks").state == "3"
+    assert hass.states.get("binary_sensor.docker_nas_problem").state == "off"
+    assert hass.states.get("sensor.nas_containers").state == "3"
+    assert hass.states.get("sensor.nas_images").state == "2"
+    assert hass.states.get("binary_sensor.nas_node_ready").state == "on"
+    assert hass.states.get("sensor.stack_media_status").state == "degraded"
+    assert hass.states.get("sensor.stack_parked_status").state == "stopped"
+    assert hass.states.get("sensor.nas_sonarr_state").state == "running"
+    assert hass.states.get("sensor.nas_radarr_state").state == "exited"
+    # Swarm-only sensors are not created for a single host.
+    for entity_id in (
+        "sensor.docker_nas_nodes_ready",
+        "sensor.docker_nas_services_running",
+        "sensor.docker_nas_tasks_running",
+        "sensor.docker_nas_task_failures_24h",
+        "sensor.nas_role",
+        "sensor.nas_tasks",
+    ):
+        assert hass.states.get(entity_id) is None, entity_id
+
+
+async def test_single_host_devices(hass: HomeAssistant, host_entry, host_portainer) -> None:
+    registry = dr.async_get(hass)
+    devices = {
+        next(i[1] for i in d.identifiers if i[0] == DOMAIN): d
+        for d in dr.async_entries_for_config_entry(registry, host_entry.entry_id)
+    }
+    prefix = f"{host_entry.entry_id}_"
+    top = devices[f"{prefix}swarm"]
+    assert top.name == "Docker NAS"
+    assert top.configuration_url.endswith("/#!/1/docker/dashboard")
+    assert devices[f"{prefix}NAS"].via_device_id == top.id
+    assert devices[f"{prefix}container_NAS/sonarr"].via_device_id == devices[f"{prefix}NAS"].id
+    assert "type=2" in devices[f"{prefix}stack_media"].configuration_url
+    # The environment name is looked up once, not on every poll.
+    await host_entry.runtime_data.async_refresh()
+    assert host_portainer.get_endpoint.await_count == 1
+    # A container that goes away loses its device.
+    host_portainer.data["containers"] = [
+        c for c in host_portainer.data["containers"] if c["Names"] != ["/watchtower"]
+    ]
+    await host_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert not has_device(hass, host_entry, (DOMAIN, f"{prefix}container_NAS/watchtower"))
+
+
+async def test_other_swarm_errors_still_fail(hass: HomeAssistant, entry, portainer) -> None:
+    from custom_components.swarm_containers.client import PortainerResponseError
+
+    portainer.get_nodes.side_effect = PortainerResponseError("Portainer returned HTTP 500", 500)
+    await entry.runtime_data.async_refresh()
+    assert entry.runtime_data.last_update_success is False
+
+
+async def test_no_image_check_on_community_edition(hass: HomeAssistant, host_entry, host_portainer) -> None:
+    await hass.async_block_till_done(wait_background_tasks=True)
+    updates = hass.states.get("sensor.docker_nas_image_updates")
+    # Unknown, not "0 updates", and flagged as unsupported.
+    assert updates.state == "unknown"
+    assert updates.attributes["supported"] is False
+    assert hass.states.get("binary_sensor.nas_sonarr_image_update").state == "unknown"
+    calls = host_portainer.get_container_image_status.await_count
+    assert calls == len(fx.HOST_CONTAINERS)
+    # Later polls don't keep asking.
+    await host_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert host_portainer.get_container_image_status.await_count == calls

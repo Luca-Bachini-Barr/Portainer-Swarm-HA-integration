@@ -230,3 +230,71 @@ def test_stopped_standalone_container_is_kept_but_not_unhealthy():
     assert "pi2/old_tool" in snap["standalone"]
     assert snap["nodes"]["pi2"]["stopped"] == 1
     assert snap["nodes"]["pi2"]["unhealthy"] == 0
+
+
+# ---------- single Docker host (not a swarm) ----------
+
+
+def host_snapshot(image_status=None):
+    return parse.build_snapshot(
+        containers=fx.HOST_CONTAINERS,
+        stats_by_id={},
+        previous_cpu={},
+        portainer_stacks=fx.HOST_STACKS,
+        resource_counts={"NAS": {"images": 7}},
+        image_status=image_status,
+        now=fx.NOW,
+        swarm=False,
+        host_name="NAS",
+        host=fx.HOST_INFO,
+    )
+
+
+def test_host_is_the_only_node():
+    snap, _ = host_snapshot()
+    assert snap["swarm"] is False
+    assert snap["host"] == "NAS"
+    assert list(snap["nodes"]) == ["NAS"]
+    node = snap["nodes"]["NAS"]
+    assert (node["total"], node["running"], node["stopped"]) == (4, 3, 1)
+    assert node["info"]["engine_version"] == "24.0.2"
+    assert node["info"]["memory_total_mib"] == 16384.0
+    assert node["info"]["state"] == "ready"
+    assert node["counts"] == {"images": 7}
+    # Not a swarm node, so nothing swarm-wide is counted.
+    assert snap["nodes_total"] == 0
+    assert snap["services"] == {}
+
+
+def test_host_containers_are_all_standalone():
+    snap, _ = host_snapshot()
+    assert sorted(snap["standalone"]) == ["NAS/postgres", "NAS/radarr", "NAS/sonarr", "NAS/watchtower"]
+    assert snap["standalone"]["NAS/sonarr"]["stack"] == "media"
+    assert snap["standalone"]["NAS/watchtower"]["stack"] == parse.NO_STACK
+
+
+def test_host_stacks_are_compose_projects():
+    snap, _ = host_snapshot(image_status={"container:" + "h1" * 32: "outdated"})
+    stacks = snap["stacks"]
+    assert sorted(stacks) == ["db", "media", "parked"]
+    media = stacks["media"]
+    assert media["state"] == "degraded"
+    assert (media["containers"], media["desired"]) == (1, 2)
+    assert media["services"] == ["radarr", "sonarr"]
+    assert media["managed"] is True and media["portainer_id"] == 21
+    assert media["updates"] == ["sonarr"]
+    # A compose project Portainer didn't deploy, and a Portainer stack with no containers.
+    assert stacks["db"]["state"] == "running" and stacks["db"]["managed"] is False
+    assert stacks["parked"]["state"] == "stopped"
+    assert snap["updates"][0]["name"] == "sonarr"
+
+
+def test_compose_labels_ignored_in_a_swarm():
+    # Standalone containers on swarm nodes keep the stack they had before.
+    plain = fx.host_container("z" * 64, "nutify", "nutify")
+    plain["Portainer"] = {"Agent": {"NodeName": "pi1"}}
+    snap, _ = parse.build_snapshot(
+        containers=[plain], stats_by_id={}, previous_cpu={}, nodes=fx.NODES, now=fx.NOW
+    )
+    assert snap["standalone"]["pi1/nutify"]["stack"] == parse.NO_STACK
+    assert "nutify" not in snap["stacks"]
