@@ -24,6 +24,14 @@ class PortainerConnectionError(PortainerError):
 class PortainerResponseError(PortainerError):
     """Portainer returned an unexpected response."""
 
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+# What Docker answers swarm requests with when the engine isn't part of a swarm.
+NOT_SWARM_STATUS = 503
+
 
 class PortainerClient:
     """Minimal client for the Portainer endpoints this integration reads."""
@@ -52,7 +60,9 @@ class PortainerClient:
                 if response.status in (401, 403):
                     raise PortainerAuthError("Portainer rejected the API token")
                 if response.status != 200:
-                    raise PortainerResponseError(f"Portainer returned HTTP {response.status}")
+                    raise PortainerResponseError(
+                        f"Portainer returned HTTP {response.status}", response.status
+                    )
                 try:
                     return await response.json(content_type=None)
                 except ValueError as err:
@@ -83,6 +93,20 @@ class PortainerClient:
         if not isinstance(data, list):
             raise PortainerResponseError(f"Unexpected response from {path.split('?')[0]}")
         return [item for item in data if isinstance(item, dict)]
+
+    async def get_endpoint(self, endpoint_id: int) -> dict[str, Any]:
+        """Return one Portainer environment."""
+        data = await self._get(f"/api/endpoints/{endpoint_id}")
+        if not isinstance(data, dict):
+            raise PortainerResponseError("Unexpected endpoint response")
+        return data
+
+    async def get_info(self, endpoint_id: int) -> dict[str, Any]:
+        """Return `docker info` for the environment's engine."""
+        data = await self._get(f"/api/endpoints/{endpoint_id}/docker/info")
+        if not isinstance(data, dict):
+            raise PortainerResponseError("Unexpected info response")
+        return data
 
     async def get_nodes(self, endpoint_id: int) -> list[dict[str, Any]]:
         """Return the swarm nodes."""
