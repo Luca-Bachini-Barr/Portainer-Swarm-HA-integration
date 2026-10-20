@@ -74,6 +74,13 @@ mode: detailed
 
 Clicking any row opens the matching entity.
 
+With more than one Portainer environment set up (for example a swarm and a NAS), each card shows one of them. Set `environment` to that environment's top device (`Docker Swarm` or `Docker <environment>`); the node card follows its `device_id`. Cards without `environment` show the swarm, so dashboards made before a second environment was added keep working. On a single Docker host the overview card shows containers, stacks and images instead of swarm nodes, services and tasks, and `show_services` on the stacks card lists each stack's containers.
+
+```yaml
+type: custom:swarm-overview-card
+environment: <Docker NAS device>
+```
+
 ## Install
 
 1. In HACS, add this repository as a custom repository (category: Integration) and download it.

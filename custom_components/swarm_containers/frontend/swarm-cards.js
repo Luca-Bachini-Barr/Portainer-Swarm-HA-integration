@@ -6,7 +6,7 @@
  * they never talk to Portainer.
  */
 
-const VERSION = "0.2.2";
+const VERSION = "0.2.5";
 const PLATFORM = "swarm_containers";
 const MODEL = {
   swarm: "Swarm",
@@ -85,10 +85,8 @@ function stateRank(state) {
   return i === -1 ? STATE_ORDER.length : i;
 }
 
-/** Index every swarm_containers entity by device kind and translation key. */
-function buildModel(hass) {
-  const model = { swarm: null, nodes: [], stacks: [], services: [], containers: [] };
-  if (!hass || !hass.entities || !hass.devices) return model;
+/** Index swarm_containers entities by device id and translation key. */
+function entitiesByDevice(hass) {
   const byDevice = new Map();
   for (const entry of Object.values(hass.entities)) {
     if (entry.platform !== PLATFORM || !entry.device_id) continue;
@@ -98,9 +96,38 @@ function buildModel(hass) {
     const slot = entry.entity_id.startsWith("binary_sensor.") ? `b_${key}` : entry.entity_id.startsWith("button.") ? `btn_${key}` : key;
     byDevice.get(entry.device_id)[slot] = entry.entity_id;
   }
+  return byDevice;
+}
+
+const entryOf = (hass, deviceId) => hass.devices[deviceId]?.config_entries?.[0];
+
+/**
+ * Pick the config entry (one Portainer environment) a card shows.
+ *
+ * The `environment` option names its top device; otherwise a card that names a
+ * node or stack follows that device's entry. With nothing set, a swarm entry is
+ * preferred so dashboards made before single hosts were supported keep working.
+ */
+function scopeEntry(hass, byDevice, config) {
+  const pick = config && (config.environment || config.device_id || config.node || config.stack);
+  if (pick && entryOf(hass, pick)) return entryOf(hass, pick);
+  const tops = [...byDevice]
+    .filter(([id]) => hass.devices[id]?.model === MODEL.swarm)
+    .sort(([a], [b]) => (hass.devices[a].name || "").localeCompare(hass.devices[b].name || ""));
+  const swarm = tops.find(([, e]) => e.nodes_ready) || tops[0];
+  return swarm ? entryOf(hass, swarm[0]) : undefined;
+}
+
+/** Index the swarm_containers entities of one environment by device kind and translation key. */
+function buildModel(hass, config) {
+  const model = { swarm: null, host: false, nodes: [], stacks: [], services: [], containers: [] };
+  if (!hass || !hass.entities || !hass.devices) return model;
+  const byDevice = entitiesByDevice(hass);
+  const scope = scopeEntry(hass, byDevice, config);
   for (const [deviceId, e] of byDevice) {
     const device = hass.devices[deviceId];
     if (!device) continue;
+    if (scope && !(device.config_entries || []).includes(scope)) continue;
     const item = { deviceId, e, name: device.name || "" };
     switch (device.model) {
       case MODEL.swarm:
@@ -127,8 +154,13 @@ function buildModel(hass) {
   for (const list of [model.nodes, model.stacks, model.services, model.containers]) {
     list.sort((a, b) => a.name.localeCompare(b.name));
   }
+  // A single Docker host (not a swarm) has no swarm-only sensors on its top device.
+  model.host = Boolean(model.swarm && !model.swarm.e.nodes_ready);
   return model;
 }
+
+// Optional on every card that isn't tied to one node: which Portainer environment to show.
+const ENVIRONMENT_FIELD = { name: "environment", selector: { device: { filter: { integration: PLATFORM, model: MODEL.swarm } } } };
 
 const st = (hass, entityId) => (entityId ? hass.states[entityId] : undefined);
 const val = (hass, entityId) => st(hass, entityId)?.state;
@@ -195,7 +227,7 @@ class SwarmBaseCard extends HTMLElement {
     this._hass = hass;
     // Home Assistant can set hass before setConfig; setConfig renders once both are known.
     if (!this._config) return;
-    this._model = buildModel(hass);
+    this._model = buildModel(hass, this._config);
     const ids = this._watched();
     const sig = ids.map((id) => {
       const s = hass.states[id];
@@ -261,6 +293,7 @@ class SwarmOverviewCard extends SwarmBaseCard {
     return {
       schema: [
         { name: "title", selector: { text: {} } },
+        ENVIRONMENT_FIELD,
         { name: "show_problems", default: true, selector: { boolean: {} } },
       ],
     };
@@ -279,28 +312,49 @@ class SwarmOverviewCard extends SwarmBaseCard {
     const nodesTotal = attr(hass, e.nodes_ready, "total");
     const servicesTotal = attr(hass, e.services_running, "total");
     const updates = val(hass, e.updates_available);
+    const updatesText =
+      updates === undefined || updates === "unknown" || updates === "unavailable" ? "–" : updates;
     const healthy = problem && problem.state === "off";
     const stat = (entity, value, label, cls = "") =>
       `<div class="stat ${cls}" data-entity="${esc(entity)}"><div class="v">${esc(value)}</div><div class="l">${esc(label)}</div></div>`;
     const showProblems = this._config.show_problems !== false;
+    let subtitle;
+    let stats;
+    if (this._model.host) {
+      // A single Docker host: its one node carries the container counts.
+      const node = this._model.nodes[0];
+      const ne = node ? node.e : {};
+      const ca = st(hass, ne.containers)?.attributes || {};
+      const version = node && hass.devices[node.deviceId]?.sw_version;
+      subtitle = `Docker host${version ? ` · Docker ${version}` : ""}`;
+      stats = `
+        ${stat(ne.containers, `${val(hass, ne.containers) ?? "–"}/${ca.total ?? "–"}`, "Containers")}
+        ${stat(ne.containers, ca.unhealthy ?? "–", "Unhealthy")}
+        ${stat(e.stacks, val(hass, e.stacks) ?? "–", "Stacks")}
+        ${stat(ne.images, val(hass, ne.images) ?? "–", "Images")}
+        ${stat(e.updates_available, updatesText, "Updates")}`;
+    } else {
+      subtitle = `Leader ${attr(hass, e.nodes_ready, "leader") || "–"} · ${attr(hass, e.nodes_ready, "managers") ?? "–"} managers`;
+      stats = `
+        ${stat(e.nodes_ready, `${val(hass, e.nodes_ready) ?? "–"}/${nodesTotal ?? "–"}`, "Nodes ready")}
+        ${stat(e.services_running, `${val(hass, e.services_running) ?? "–"}/${servicesTotal ?? "–"}`, "Services")}
+        ${stat(e.stacks, val(hass, e.stacks) ?? "–", "Stacks")}
+        ${stat(e.tasks_running, val(hass, e.tasks_running) ?? "–", "Tasks")}
+        ${stat(e.updates_available, updatesText, "Updates")}
+        ${stat(e.task_failures, val(hass, e.task_failures) ?? "–", "Failures 24h")}`;
+    }
     this._paint(`
       <div class="header">
         <ha-icon icon="mdi:docker"></ha-icon>
         <div class="grow">
-          <div class="title">${esc(this._config.title || "Swarm")}</div>
-          <div class="subtitle">Leader ${esc(attr(hass, e.nodes_ready, "leader") || "–")} · ${esc(attr(hass, e.nodes_ready, "managers") ?? "–")} managers</div>
+          <div class="title">${esc(this._config.title || (this._model.host ? sw.name : "Swarm"))}</div>
+          <div class="subtitle">${esc(subtitle)}</div>
         </div>
         <span class="chip ${problem ? (healthy ? "good" : "bad") : ""}" data-entity="${esc(e.b_swarm_problem)}">
           <ha-icon icon="${healthy ? "mdi:check-circle" : "mdi:alert-circle"}"></ha-icon>${healthy ? "Healthy" : problem ? `${reasons.length} problem${reasons.length === 1 ? "" : "s"}` : "–"}
         </span>
       </div>
-      <div class="stats">
-        ${stat(e.nodes_ready, `${val(hass, e.nodes_ready) ?? "–"}/${nodesTotal ?? "–"}`, "Nodes ready")}
-        ${stat(e.services_running, `${val(hass, e.services_running) ?? "–"}/${servicesTotal ?? "–"}`, "Services")}
-        ${stat(e.stacks, val(hass, e.stacks) ?? "–", "Stacks")}
-        ${stat(e.tasks_running, val(hass, e.tasks_running) ?? "–", "Tasks")}
-        ${stat(e.updates_available, updates === undefined || updates === "unknown" ? "–" : updates, "Updates")}
-        ${stat(e.task_failures, val(hass, e.task_failures) ?? "–", "Failures 24h")}
+      <div class="stats">${stats}
       </div>
       ${showProblems && reasons.length
         ? `<ul class="problems">${reasons.map((r) => `<li><ha-icon icon="mdi:alert"></ha-icon>${esc(r)}</li>`).join("")}</ul>`
@@ -364,17 +418,26 @@ class SwarmNodeCard extends SwarmBaseCard {
     const barColor = (pct) =>
       pct === null ? "var(--disabled-color)" : pct > 85 ? "var(--error-color, #db4437)" : pct > 65 ? "var(--warning-color, #ffa600)" : "var(--success-color, #43a047)";
 
-    const chips = [
-      `<span class="chip" data-entity="${esc(e.role)}"><ha-icon icon="${ra.leader ? "mdi:crown" : "mdi:server"}"></ha-icon>${esc(ra.leader ? "Leader" : role?.state === "manager" ? "Manager" : role?.state === "worker" ? "Worker" : "–")}</span>`,
-    ];
+    const host = this._model.host;
+    const chips = host
+      ? [`<span class="chip"><ha-icon icon="mdi:server"></ha-icon>Docker host</span>`]
+      : [
+          `<span class="chip" data-entity="${esc(e.role)}"><ha-icon icon="${ra.leader ? "mdi:crown" : "mdi:server"}"></ha-icon>${esc(ra.leader ? "Leader" : role?.state === "manager" ? "Manager" : role?.state === "worker" ? "Worker" : "–")}</span>`,
+        ];
     if (ra.availability && ra.availability !== "active") chips.push(`<span class="chip warn">${esc(ra.availability)}</span>`);
+    // A single host has no role sensor; its engine version is on the device.
+    const engine = ra.engine_version || hass.devices[node.deviceId]?.sw_version;
+    const subtitle = [ra.address, engine ? `Docker ${engine}` : ""].filter(Boolean).join(" · ");
+    const fourth = host
+      ? `<div class="stat" data-entity="${esc(e.containers)}"><div class="v">${esc(ca.total ?? "–")}</div><div class="l">Total</div></div>`
+      : `<div class="stat" data-entity="${esc(e.tasks)}"><div class="v">${esc(val(hass, e.tasks) ?? "–")}</div><div class="l">Swarm tasks</div></div>`;
 
     let html = `
       <div class="header">
         <div class="dot" style="background:${online === "on" ? stateColor("ready") : online === "off" ? stateColor("down") : stateColor("")}" data-entity="${esc(e.b_online)}"></div>
         <div class="grow">
           <div class="title">${esc(node.name)}</div>
-          <div class="subtitle">${esc(ra.address || "")}${ra.engine_version ? ` · Docker ${esc(ra.engine_version)}` : ""}</div>
+          <div class="subtitle">${esc(subtitle)}</div>
         </div>
         ${chips.join("")}
       </div>
@@ -382,7 +445,7 @@ class SwarmNodeCard extends SwarmBaseCard {
         <div class="stat" data-entity="${esc(e.containers)}"><div class="v">${esc(cont?.state ?? "–")}</div><div class="l">Running</div></div>
         <div class="stat" data-entity="${esc(e.containers)}"><div class="v">${esc(ca.stopped ?? "–")}</div><div class="l">Stopped</div></div>
         <div class="stat" data-entity="${esc(e.containers)}"><div class="v" style="${ca.unhealthy ? `color:${stateColor("unhealthy")}` : ""}">${esc(ca.unhealthy ?? "–")}</div><div class="l">Unhealthy</div></div>
-        <div class="stat" data-entity="${esc(e.tasks)}"><div class="v">${esc(val(hass, e.tasks) ?? "–")}</div><div class="l">Swarm tasks</div></div>
+        ${fourth}
       </div>`;
     if (mode !== "compact") {
       html += `
@@ -417,6 +480,7 @@ class SwarmStacksCard extends SwarmBaseCard {
     return {
       schema: [
         { name: "title", selector: { text: {} } },
+        ENVIRONMENT_FIELD,
         { name: "node", selector: { device: { filter: { integration: PLATFORM, model: MODEL.node } } } },
         { name: "show_services", default: false, selector: { boolean: {} } },
         { name: "hide_stopped", default: false, selector: { boolean: {} } },
@@ -438,8 +502,15 @@ class SwarmStacksCard extends SwarmBaseCard {
       stacks.sort((a, b) => stateRank(a.state) - stateRank(b.state) || a.name.localeCompare(b.name));
     }
     const servicesByName = new Map(this._model.services.map((s) => [s.name, s]));
+    const host = this._model.host;
+    // On a single host a stack's members are containers ("<node> <container>" devices).
+    const containerByName = (name) => this._model.containers.find((c) => c.name.endsWith(` ${name}`));
     const rows = stacks.map((s) => {
       const updates = s.a.updates || [];
+      const counts = host
+        ? `<span class="num muted small" title="Containers running / total" style="min-width:34px"><ha-icon icon="mdi:docker" style="--mdc-icon-size:14px"></ha-icon>${esc(s.a.containers ?? 0)}/${esc(s.a.desired ?? 0)}</span>`
+        : `<span class="num muted small" title="Services running">${esc(s.a.services_running ?? 0)}/${esc((s.a.services || []).length)} svc</span>
+          <span class="num muted small" title="Containers" style="min-width:34px"><ha-icon icon="mdi:docker" style="--mdc-icon-size:14px"></ha-icon>${esc(s.a.containers ?? 0)}</span>`;
       let row = `
         <div class="row" data-entity="${esc(s.e.stack_status)}" title="${esc(STATE_LABEL[s.state] || s.state || "")}">
           <div class="dot" style="background:${stateColor(s.state)}"></div>
@@ -448,10 +519,20 @@ class SwarmStacksCard extends SwarmBaseCard {
           ${s.state && s.state !== "running" && s.state !== "stopped" ? `<span class="chip ${s.state === "down" ? "bad" : "warn"}">${esc(STATE_LABEL[s.state] || s.state)}</span>` : ""}
           ${updates.length ? `<span class="chip warn"><ha-icon icon="mdi:arrow-up-circle"></ha-icon>${updates.length}</span>` : ""}
           ${s.a.failures_24h ? `<span class="chip bad"><ha-icon icon="mdi:alert-circle"></ha-icon>${esc(s.a.failures_24h)}</span>` : ""}
-          <span class="num muted small" title="Services running">${esc(s.a.services_running ?? 0)}/${esc((s.a.services || []).length)} svc</span>
-          <span class="num muted small" title="Containers" style="min-width:34px"><ha-icon icon="mdi:docker" style="--mdc-icon-size:14px"></ha-icon>${esc(s.a.containers ?? 0)}</span>
+          ${counts}
         </div>`;
-      if (this._config.show_services) {
+      if (this._config.show_services && host) {
+        row += (s.a.services || []).map((name) => {
+          const c = containerByName(name);
+          if (!c) return "";
+          const cstate = val(hass, c.e.container_state);
+          return `<div class="row small indent" data-entity="${esc(c.e.container_state)}">
+              <div class="dot" style="background:${stateColor(cstate)}"></div>
+              <span class="name">${esc(name)}</span>
+              <span class="num muted">${esc(cstate ?? "–")}</span>
+            </div>`;
+        }).join("");
+      } else if (this._config.show_services) {
         row += (s.a.services || []).map((name) => {
           const svc = servicesByName.get(name);
           if (!svc) return "";
@@ -491,6 +572,7 @@ class SwarmServicesCard extends SwarmBaseCard {
     return {
       schema: [
         { name: "title", selector: { text: {} } },
+        ENVIRONMENT_FIELD,
         { name: "stack", selector: { device: { filter: { integration: PLATFORM, model: MODEL.stack } } } },
         { name: "node", selector: { device: { filter: { integration: PLATFORM, model: MODEL.node } } } },
         { name: "group_by", default: "stack", selector: { select: { mode: "dropdown", options: ["stack", "node", "none"] } } },
@@ -528,10 +610,14 @@ class SwarmServicesCard extends SwarmBaseCard {
         const health = val(hass, c.e.health);
         rows.push({
           kind: "container",
-          name: c.name.includes(" ") ? c.name.split(" ").slice(1).join(" ") : c.name,
+          // Devices are named "<node> <container>"; node names can contain spaces.
+          name: a.node && c.name.startsWith(`${a.node} `)
+            ? c.name.slice(a.node.length + 1)
+            : c.name.includes(" ") ? c.name.split(" ").slice(1).join(" ") : c.name,
           entity: c.e.container_state,
           state: s?.state,
-          stack: "standalone",
+          // On a single host this is the container's compose project.
+          stack: a.stack || "standalone",
           nodes: a.node ? [a.node] : [],
           running: s?.state === "running" ? 1 : 0,
           desired: 1,
@@ -619,6 +705,7 @@ class SwarmUpdatesCard extends SwarmBaseCard {
     return {
       schema: [
         { name: "title", selector: { text: {} } },
+        ENVIRONMENT_FIELD,
         { name: "hide_when_empty", default: false, selector: { boolean: {} } },
       ],
     };
@@ -654,7 +741,8 @@ class SwarmUpdatesCard extends SwarmBaseCard {
         </div>`;
     });
     let body;
-    if (a.enabled === false) body = `<div class="empty">Image checks are turned off in the integration options.</div>`;
+    if (a.supported === false) body = `<div class="empty">Image update checks need Portainer Business Edition.</div>`;
+    else if (a.enabled === false) body = `<div class="empty">Image checks are turned off in the integration options.</div>`;
     else if (!a.last_checked) body = `<div class="empty">Waiting for the first image check…</div>`;
     else if (!rows.length) body = `<div class="empty"><ha-icon icon="mdi:check-circle-outline"></ha-icon> Every image is up to date.</div>`;
     else body = rows.join("");
