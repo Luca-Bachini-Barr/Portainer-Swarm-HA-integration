@@ -45,6 +45,15 @@ Containers on the nodes that are not part of a swarm service (for example, start
 
 Devices for stacks, services and containers that disappear are removed automatically.
 
+### Docker hosts that aren't in a swarm
+
+You can also add a Portainer environment that is a single Docker host (for example a NAS). The integration notices that the engine isn't in a swarm and adapts:
+
+- The top device is named `Docker <environment>` and the host is its one node, with containers, CPU, memory, an online sensor and the image, volume and network counts.
+- Every container gets a standalone container device.
+- Stacks are the compose projects (from the `com.docker.compose.project` label), so stacks started outside Portainer show too. A stack is `running` when all its containers run, `degraded` when only some do and `stopped` when none do. Portainer stacks with no containers show as `stopped`.
+- The swarm-only sensors (nodes ready, services running, tasks, task failures, and each node's role and tasks) are not created.
+
 ## Dashboard cards
 
 The cards are bundled with the integration, which adds them to your dashboard resources itself (and updates the entry after an upgrade). There's nothing to install separately. Search for "Swarm" in the add-card dialog. Each card has a visual editor.
@@ -92,7 +101,7 @@ You will be asked for:
 
 - **CPU** is measured between two polls, so it shows after the second update. Service and container CPU are `docker stats` style (100% = one core). Node CPU is the share of the whole node used by its containers.
 - **Memory** excludes the page cache, as `docker stats` does. Node memory is the sum of its containers against the node's total RAM.
-- **Image updates** come from Portainer's registry check. Services and containers whose image is pinned or unreachable show as unknown.
+- **Image updates** come from Portainer's registry check. Services and containers whose image is pinned or unreachable show as unknown. The check is a Portainer Business Edition feature: with Community Edition the integration notices after the first check, stops asking, and leaves image updates unknown (the updates sensor gets `supported: false`).
 - **Task failures** count tasks that ended `failed` or `rejected` in the last 24 hours, from the swarm's task history.
 
 ## Security

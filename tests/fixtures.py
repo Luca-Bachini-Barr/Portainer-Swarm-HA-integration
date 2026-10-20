@@ -121,6 +121,42 @@ STACKS = [
 ]
 
 
+# A single Docker host (not a swarm) reached without the Portainer agent: two compose
+# projects (one with a stopped container) and a plain `docker run` container.
+def host_container(cid, name, project=None, state="running"):
+    return {
+        "Id": cid,
+        "Names": [f"/{name}"],
+        "Image": f"example/{name}:latest",
+        "State": state,
+        "Status": "Up 3 days" if state == "running" else "Exited (0) 2 hours ago",
+        "Labels": {"com.docker.compose.project": project} if project else {},
+        "NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.2"}}},
+    }
+
+
+HOST_CONTAINERS = [
+    host_container("h1" * 32, "sonarr", "media"),
+    host_container("h2" * 32, "radarr", "media", state="exited"),
+    host_container("h3" * 32, "postgres", "db"),
+    host_container("h4" * 32, "watchtower"),
+]
+
+HOST_STACKS = [
+    {"Id": 21, "Name": "media", "EndpointId": 1, "UpdateDate": 1792000000},
+    {"Id": 22, "Name": "parked", "EndpointId": 1},
+]
+
+HOST_INFO = {
+    "Name": "nas",
+    "ServerVersion": "24.0.2",
+    "OperatingSystem": "Synology DSM",
+    "Architecture": "x86_64",
+    "NCPU": 4,
+    "MemTotal": 16384 * MIB,
+}
+
+
 def stats(cpu_total, system, mem_used_mib):
     return {
         "cpu_stats": {"cpu_usage": {"total_usage": cpu_total}, "system_cpu_usage": system, "online_cpus": 4},

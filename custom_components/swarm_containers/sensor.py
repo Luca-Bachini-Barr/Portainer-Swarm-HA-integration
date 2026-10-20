@@ -31,6 +31,8 @@ class SwarmSensorDescription(SensorEntityDescription):
 
     value_fn: Callable[[dict[str, Any]], Any]
     attrs_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    # Only meaningful in a swarm; not created for a single Docker host.
+    swarm_only: bool = False
 
 
 def _pct(**kwargs: Any) -> dict[str, Any]:
@@ -71,6 +73,7 @@ SWARM_SENSORS: tuple[SwarmSensorDescription, ...] = (
                 for name, t in sorted(d["nodes"].items())
             },
         },
+        swarm_only=True,
         **_count(),
     ),
     SwarmSensorDescription(
@@ -79,6 +82,7 @@ SWARM_SENSORS: tuple[SwarmSensorDescription, ...] = (
         icon="mdi:cube-outline",
         value_fn=lambda d: d["services_running"],
         attrs_fn=lambda d: {"total": d["services_total"], "problems": d["problem_services"]},
+        swarm_only=True,
         **_count(),
     ),
     SwarmSensorDescription(
@@ -97,6 +101,7 @@ SWARM_SENSORS: tuple[SwarmSensorDescription, ...] = (
         translation_key="tasks_running",
         icon="mdi:format-list-checks",
         value_fn=lambda d: d["tasks_running"],
+        swarm_only=True,
         **_count(),
     ),
     SwarmSensorDescription(
@@ -108,6 +113,7 @@ SWARM_SENSORS: tuple[SwarmSensorDescription, ...] = (
             "updates": d["updates"],
             "last_checked": d["updates_checked"],
             "enabled": d["image_check"],
+            "supported": d.get("image_check_supported", True),
         },
         **_count(),
     ),
@@ -121,6 +127,7 @@ SWARM_SENSORS: tuple[SwarmSensorDescription, ...] = (
                 s["name"]: s["failures_24h"] for s in d["services"].values() if s["failures_24h"]
             }
         },
+        swarm_only=True,
         **_count(),
     ),
 )
@@ -166,6 +173,7 @@ NODE_SENSORS: tuple[SwarmSensorDescription, ...] = (
         translation_key="tasks",
         icon="mdi:format-list-checks",
         value_fn=lambda n: n["tasks"],
+        swarm_only=True,
         **_count(),
     ),
     SwarmSensorDescription(
@@ -189,6 +197,7 @@ NODE_SENSORS: tuple[SwarmSensorDescription, ...] = (
                 "memory_total_mib",
             )
         },
+        swarm_only=True,
     ),
     SwarmSensorDescription(
         key="images",
@@ -368,7 +377,11 @@ async def async_setup_entry(
     coordinator = entry.runtime_data
 
     def make(kind: str, descriptions: tuple[SwarmSensorDescription, ...]):
-        return lambda key: [SwarmSensor(coordinator, kind, key, d) for d in descriptions]
+        return lambda key: [
+            SwarmSensor(coordinator, kind, key, d)
+            for d in descriptions
+            if coordinator.data["swarm"] or not d.swarm_only
+        ]
 
     entry.async_on_unload(
         add_entities_dynamically(

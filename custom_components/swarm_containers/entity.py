@@ -75,6 +75,15 @@ def _device_fields(coordinator: SwarmContainersCoordinator, kind: str, key: str)
     base_url = str(coordinator.config_entry.data["url"]).rstrip("/")
     endpoint = coordinator.endpoint_id
     if kind == SWARM:
+        if not data.get("swarm", True):
+            # A single Docker host: the top-level device stands for the environment.
+            return {
+                "identifiers": {swarm_identifier(entry_id)},
+                "name": f"Docker {data['host']}",
+                "manufacturer": "Docker",
+                "model": MODEL_SWARM,
+                "configuration_url": f"{base_url}/#!/{endpoint}/docker/dashboard",
+            }
         return {
             "identifiers": {swarm_identifier(entry_id)},
             "name": "Docker Swarm",
@@ -95,7 +104,9 @@ def _device_fields(coordinator: SwarmContainersCoordinator, kind: str, key: str)
         stack = data["stacks"].get(key) or {}
         url = f"{base_url}/#!/{endpoint}/docker/stacks/{key}"
         if stack.get("portainer_id"):
-            url += f"?id={stack['portainer_id']}&type=1&regular=true"
+            # Portainer stack types: 1 = swarm, 2 = compose.
+            stack_type = 1 if data.get("swarm", True) else 2
+            url += f"?id={stack['portainer_id']}&type={stack_type}&regular=true"
         return {
             "identifiers": {stack_identifier(entry_id, key)},
             "name": f"Stack {key}",

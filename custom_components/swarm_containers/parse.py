@@ -42,10 +42,14 @@ def short_image(image: str) -> str:
     return str(image).split("@", 1)[0]
 
 
-def node_name(container: dict[str, Any]) -> str:
-    """Return the node (Pi) a container runs on, as reported by the Portainer agent."""
+def node_name(container: dict[str, Any], default: str | None = None) -> str:
+    """Return the node (Pi) a container runs on, as reported by the Portainer agent.
+
+    Environments Portainer reaches without its agent don't tag containers with a
+    node, so ``default`` (the host's name) is used for those.
+    """
     agent = (container.get("Portainer") or {}).get("Agent") or {}
-    return str(agent.get("NodeName") or "unknown")
+    return str(agent.get("NodeName") or default or "unknown")
 
 
 def health_state(container: dict[str, Any]) -> str:
@@ -200,6 +204,32 @@ def node_info(node: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def host_info(name: str, info: dict[str, Any] | None) -> dict[str, Any]:
+    """Summarise `docker info` for a host that isn't in a swarm, like node_info.
+
+    There is no role, so the host doesn't count as a swarm node.
+    """
+    info = info or {}
+    return {
+        "hostname": name,
+        "state": "ready" if info else "unknown",
+        "engine_version": info.get("ServerVersion"),
+        "os": info.get("OperatingSystem") or info.get("OSType"),
+        "architecture": info.get("Architecture"),
+        "cpus": info.get("NCPU"),
+        "memory_total_mib": round((info.get("MemTotal") or 0) / 1048576, 1) or None,
+    }
+
+
+def compose_stack_state(running: int, total: int) -> str:
+    """Return a STACK_STATES value for a compose project from its containers."""
+    if running == 0:
+        return "stopped"
+    if running < total:
+        return "degraded"
+    return "running"
+
+
 def service_state(running: int, desired: int, update_state: str | None) -> str:
     """Return one of SERVICE_STATES."""
     if desired == 0:
@@ -225,13 +255,17 @@ def _container_row(
     container: dict[str, Any],
     stats: dict[str, Any] | None,
     cpu: tuple[float | None, float | None],
+    compose: bool = False,
 ) -> dict[str, Any]:
     labels = container.get("Labels") or {}
     mem_mib, mem_pct = memory_from_stats(stats)
     ip, networks = addresses(container)
+    stack = labels.get("com.docker.stack.namespace")
+    if not stack and compose:
+        stack = labels.get("com.docker.compose.project")
     return {
         "name": container_name(container),
-        "stack": labels.get("com.docker.stack.namespace") or NO_STACK,
+        "stack": stack or NO_STACK,
         "service": labels.get("com.docker.swarm.service.name"),
         "image": short_image(container.get("Image", "")),
         "health": health_state(container),
@@ -253,6 +287,47 @@ def _sum(values: list[float | None]) -> float | None:
     return round(sum(real), 1) if real else None
 
 
+def compose_stacks(
+    standalone: dict[str, dict[str, Any]], portainer_by_name: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Build stack rows from compose projects, in the same shape as swarm stacks.
+
+    Each stack's "services" are its containers. A Portainer stack with no containers
+    (stopped, or never deployed) is listed as stopped.
+    """
+    members: dict[str, list[dict[str, Any]]] = {name: [] for name in portainer_by_name}
+    for row in standalone.values():
+        if row["stack"] != NO_STACK:
+            members.setdefault(row["stack"], []).append(row)
+    stacks: dict[str, dict[str, Any]] = {}
+    for name, rows in members.items():
+        rows = sorted(rows, key=lambda r: r["name"])
+        running = [r for r in rows if r["state"] == "running"]
+        portainer = portainer_by_name.get(name)
+        updated = None
+        if portainer and portainer.get("UpdateDate"):
+            updated = datetime.fromtimestamp(int(portainer["UpdateDate"]), timezone.utc)
+        stacks[name] = {
+            "name": name,
+            "state": compose_stack_state(len(running), len(rows)),
+            "services": [r["name"] for r in rows],
+            "services_running": len(running),
+            "containers": len(running),
+            "desired": len(rows),
+            "nodes": sorted({r["node"] for r in rows}),
+            "updates": sorted(r["name"] for r in rows if r.get("update") == OUTDATED),
+            "unhealthy": sum(r["health"] == "unhealthy" for r in running),
+            "failures_24h": 0,
+            "cpu_percent": _sum([r["cpu_percent"] for r in running]),
+            "memory_mib": _sum([r["memory_mib"] for r in running]),
+            "portainer_id": portainer.get("Id") if portainer else None,
+            "managed": portainer is not None,
+            "git": bool(portainer and portainer.get("GitConfig")),
+            "updated": _iso(updated),
+        }
+    return stacks
+
+
 def build_snapshot(
     *,
     containers: list[dict[str, Any]],
@@ -266,12 +341,19 @@ def build_snapshot(
     image_status: dict[str, str] | None = None,
     image_checked: datetime | None = None,
     now: datetime | None = None,
+    swarm: bool = True,
+    host_name: str | None = None,
+    host: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, tuple[int, int, int]]]:
     """Build the whole swarm snapshot.
 
     Returns (snapshot, cpu samples to keep for the next poll). ``snapshot["nodes"]``
     keeps the original per-node table shape so existing dashboards continue to
     work; the rest of the snapshot is swarm-wide.
+
+    With ``swarm=False`` the environment is a single Docker host (``host_name``, with
+    ``host`` from `docker info`): it becomes the one node, every container is a
+    standalone container, and stacks are the compose projects.
     """
     now = now or datetime.now(timezone.utc)
     nodes = nodes or []
@@ -280,9 +362,12 @@ def build_snapshot(
     portainer_stacks = portainer_stacks or []
     resource_counts = resource_counts or {}
     image_status = image_status or {}
+    default_node = None if swarm else host_name
 
     node_by_id = {n.get("ID"): node_info(n) for n in nodes}
     node_by_name = {info["hostname"]: info for info in node_by_id.values()}
+    if default_node:
+        node_by_name[default_node] = host_info(default_node, host)
 
     # Containers: one row each, with CPU measured against the previous poll.
     new_cpu: dict[str, tuple[int, int, int]] = {}
@@ -301,8 +386,10 @@ def build_snapshot(
         sample = cpu_sample(stats)
         if sample is not None:
             new_cpu[cid] = sample
-        row = _container_row(container, stats, cpu_percent(previous_cpu.get(cid), sample))
-        node = node_name(container)
+        row = _container_row(
+            container, stats, cpu_percent(previous_cpu.get(cid), sample), compose=not swarm
+        )
+        node = node_name(container, default_node)
         row["node"] = node
         rows_by_node.setdefault(node, []).append(row)
         if task_id:
@@ -477,6 +564,9 @@ def build_snapshot(
                 "updated": _iso(updated),
             }
         )
+    if not swarm:
+        # A single host has no services: its stacks are its compose projects.
+        stacks = compose_stacks(standalone, portainer_by_name)
 
     updates = [
         {"kind": "service", "name": s["name"], "stack": s["stack"], "image": s["image"], "nodes": s["nodes"]}
@@ -492,6 +582,8 @@ def build_snapshot(
     node_infos = [t["info"] for t in node_tables.values() if t["info"].get("role")]
     problems = [s["name"] for s in service_rows.values() if s["state"] in ("down", "degraded", "update_paused")]
     snapshot = {
+        "swarm": swarm,
+        "host": default_node,
         "nodes": node_tables,
         "nodes_total": len(node_infos),
         "nodes_ready": sum(i.get("state") == "ready" for i in node_infos),

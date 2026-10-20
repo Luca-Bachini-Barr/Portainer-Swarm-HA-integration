@@ -66,7 +66,10 @@ NODE_BINARY = (
         key="online",
         translation_key="online",
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
-        value_fn=lambda n: n["info"].get("state") == "ready" if n["info"].get("role") else None,
+        # A swarm node has a role; a single host has engine details once `docker info` answers.
+        value_fn=lambda n: n["info"].get("state") == "ready"
+        if n["info"].get("role") or n["info"].get("engine_version")
+        else None,
         attrs_fn=lambda n: {"state": n["info"].get("state"), "availability": n["info"].get("availability")},
     ),
 )
