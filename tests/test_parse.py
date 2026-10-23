@@ -298,3 +298,73 @@ def test_compose_labels_ignored_in_a_swarm():
     )
     assert snap["standalone"]["pi1/nutify"]["stack"] == parse.NO_STACK
     assert "nutify" not in snap["stacks"]
+
+
+# ---------- update history (Gantry / Watchtower logs) ----------
+
+
+def frame(text, stream=2):
+    data = text.encode()
+    return bytes([stream, 0, 0, 0]) + len(data).to_bytes(4, "big") + data
+
+
+GANTRY_LOG = b"".join(
+    frame(line)
+    for line in (
+        "2026-10-23T08:56:52.906284826Z \x1b[0;32m[INFO]\x1b[0m update_gantry: 2 service(s) updated: web_app, web_db\n",
+        "2026-10-23T08:56:53.000000000Z [INFO] update_gantry: Done. Use 3m 8s. 0 error(s).\n",
+    )
+)
+
+WATCHTOWER_LOG = b"".join(
+    frame(line)
+    for line in (
+        '2026-10-22T06:32:08.1Z time="2026-10-22T07:32:08+01:00" level=info msg="Found new portainer/portainer-ce:latest image (8bfae45f9e7b)"\n',
+        '2026-10-22T06:32:08.2Z time="2026-10-22T07:32:08+01:00" level=info msg="Stopping /portainer-ce (8f358b50b8cd) with SIGTERM"\n',
+        '2026-10-22T06:32:15.5Z time="2026-10-22T07:32:15+01:00" level=info msg="Creating /portainer-ce"\n',
+    )
+)
+
+
+def test_updater_kind():
+    assert parse.updater_kind("shizunge/gantry:latest@sha256:abc") == "gantry"
+    assert parse.updater_kind("containrrr/watchtower") == "watchtower"
+    assert parse.updater_kind("ghcr.io/nicholas-fedor/watchtower:1.9") == "watchtower"
+    assert parse.updater_kind("nginx:1.27") is None
+
+
+def test_log_lines_demultiplexes_and_strips_colours():
+    lines = parse.log_lines(GANTRY_LOG)
+    assert len(lines) == 2
+    assert lines[0][0].isoformat() == "2026-10-23T08:56:52.906284+00:00"
+    assert lines[0][1] == "[INFO] update_gantry: 2 service(s) updated: web_app, web_db"
+    # Output from a TTY container isn't multiplexed.
+    assert parse.log_lines(b"2026-10-23T08:56:52Z hello\n") == [
+        (parse.parse_time("2026-10-23T08:56:52Z"), "hello")
+    ]
+
+
+def test_gantry_updates():
+    events = parse.gantry_updates(parse.log_lines(GANTRY_LOG))
+    assert [e["name"] for e in events] == ["web_app", "web_db"]
+    assert all(e["source"] == "gantry" and e["when"].startswith("2026-10-23T08:56") for e in events)
+
+
+def test_watchtower_updates():
+    events = parse.watchtower_updates(parse.log_lines(WATCHTOWER_LOG))
+    assert events == [
+        {
+            "name": "portainer-ce",
+            "when": "2026-10-22T06:32:15.500000+00:00",
+            "source": "watchtower",
+            "image": "portainer/portainer-ce:latest",
+        }
+    ]
+
+
+def test_merge_updates_dedupes_and_limits():
+    old = parse.gantry_updates(parse.log_lines(GANTRY_LOG))
+    new = parse.watchtower_updates(parse.log_lines(WATCHTOWER_LOG))
+    merged = parse.merge_updates(old, [*new, *old], 10)
+    assert [e["name"] for e in merged] == ["web_app", "web_db", "portainer-ce"]
+    assert len(parse.merge_updates(old, new, 2)) == 2
