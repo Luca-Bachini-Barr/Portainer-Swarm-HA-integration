@@ -6,7 +6,7 @@ from typing import Any
 
 import aiohttp
 
-from .const import IMAGE_CHECK_TIMEOUT, REQUEST_TIMEOUT
+from .const import IMAGE_CHECK_TIMEOUT, LOG_TIMEOUT, REQUEST_TIMEOUT
 
 
 class PortainerError(Exception):
@@ -49,7 +49,9 @@ class PortainerClient:
         path: str,
         extra_headers: dict[str, str] | None = None,
         timeout: float = REQUEST_TIMEOUT,
+        raw: bool = False,
     ) -> Any:
+        """GET a Portainer path and return its JSON (or its bytes with ``raw``)."""
         headers = {"X-API-Key": self._api_token, **(extra_headers or {})}
         try:
             async with self._session.get(
@@ -63,6 +65,8 @@ class PortainerClient:
                     raise PortainerResponseError(
                         f"Portainer returned HTTP {response.status}", response.status
                     )
+                if raw:
+                    return await response.read()
                 try:
                     return await response.json(content_type=None)
                 except ValueError as err:
@@ -174,3 +178,24 @@ class PortainerClient:
         if not isinstance(data, dict):
             raise PortainerResponseError("Unexpected stats response")
         return data
+
+    async def get_service_logs(self, endpoint_id: int, service_id: str, since: int) -> bytes:
+        """Return a swarm service's log output since a Unix time, with timestamps."""
+        return await self._get(
+            f"/api/endpoints/{endpoint_id}/docker/services/{service_id}/logs"
+            f"?stdout=1&stderr=1&timestamps=1&since={since}",
+            timeout=LOG_TIMEOUT,
+            raw=True,
+        )
+
+    async def get_container_logs(
+        self, endpoint_id: int, container_id: str, since: int, node: str | None = None
+    ) -> bytes:
+        """Return a container's log output since a Unix time, with timestamps."""
+        return await self._get(
+            f"/api/endpoints/{endpoint_id}/docker/containers/{container_id}/logs"
+            f"?stdout=1&stderr=1&timestamps=1&since={since}",
+            {"X-PortainerAgent-Target": node} if node else None,
+            LOG_TIMEOUT,
+            raw=True,
+        )
