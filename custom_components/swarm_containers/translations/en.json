@@ -44,12 +44,14 @@
           "scan_interval": "Update interval (seconds)",
           "image_check": "Check for image updates",
           "image_check_interval": "Image check interval (seconds)",
-          "standalone_containers": "Create devices for standalone containers"
+          "standalone_containers": "Create devices for standalone containers",
+          "update_history": "Record recent updates from Gantry / Watchtower"
         },
         "data_description": {
           "image_check": "Asks Portainer to compare each running image with its registry. Read-only; nothing is pulled.",
           "image_check_interval": "Each check queries the registry once per image, so keep this infrequent.",
-          "standalone_containers": "Containers on the nodes that are not part of a swarm service, such as ones started with docker run or compose."
+          "standalone_containers": "Containers on the nodes that are not part of a swarm service, such as ones started with docker run or compose.",
+          "update_history": "Reads the logs of a Gantry service or Watchtower container in this environment every 15 minutes and keeps the last 25 updates."
         }
       }
     }
@@ -160,6 +162,9 @@
           "starting": "Starting",
           "none": "No health check"
         }
+      },
+      "recent_updates": {
+        "name": "Recent updates"
       }
     },
     "binary_sensor": {

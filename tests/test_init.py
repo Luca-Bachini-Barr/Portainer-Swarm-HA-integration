@@ -226,6 +226,11 @@ def host_portainer():
 
     client.get_service_image_status = AsyncMock(side_effect=no_image_check)
     client.get_container_image_status = AsyncMock(side_effect=no_image_check)
+    log = (
+        '2026-10-22T06:32:08.1Z time="x" level=info msg="Found new example/sonarr:latest image (8bfae45f)"\n'
+        '2026-10-22T06:32:15.5Z time="x" level=info msg="Creating /sonarr"\n'
+    ).encode()
+    client.get_container_logs = AsyncMock(return_value=bytes([2, 0, 0, 0]) + len(log).to_bytes(4, "big") + log)
     with patch(CLIENT, return_value=client):
         yield client
 
@@ -259,6 +264,17 @@ async def test_single_host_entities(hass: HomeAssistant, host_entry) -> None:
     assert hass.states.get("sensor.stack_parked_status").state == "stopped"
     assert hass.states.get("sensor.nas_sonarr_state").state == "running"
     assert hass.states.get("sensor.nas_radarr_state").state == "exited"
+    await hass.async_block_till_done(wait_background_tasks=True)
+    recent = hass.states.get("sensor.docker_nas_recent_updates")
+    assert recent.attributes["sources"] == ["watchtower"]
+    assert recent.attributes["updates"][0] == {
+        "name": "sonarr",
+        "when": "2026-10-22T06:32:15.500000+00:00",
+        "source": "watchtower",
+        "image": "example/sonarr:latest",
+        "stack": "media",
+        "nodes": ["NAS"],
+    }
     # Swarm-only sensors are not created for a single host.
     for entity_id in (
         "sensor.docker_nas_nodes_ready",
@@ -317,3 +333,38 @@ async def test_no_image_check_on_community_edition(hass: HomeAssistant, host_ent
     await host_entry.runtime_data.async_refresh()
     await hass.async_block_till_done(wait_background_tasks=True)
     assert host_portainer.get_container_image_status.await_count == calls
+
+
+async def test_recent_updates_from_gantry(hass: HomeAssistant, portainer) -> None:
+    gantry = fx.service("s9", "update_gantry", "update")
+    gantry["Spec"]["TaskTemplate"]["ContainerSpec"]["Image"] = "shizunge/gantry:latest@sha256:abc"
+    portainer.data["services"].append(gantry)
+    log = "2026-10-23T08:56:52.906284826Z [INFO] update_gantry: 1 service(s) updated: web_app\n".encode()
+    portainer.get_service_logs = AsyncMock(return_value=bytes([2, 0, 0, 0]) + len(log).to_bytes(4, "big") + log)
+    hass.config.components.update({"frontend", "http"})
+    hass.http = MagicMock(async_register_static_paths=AsyncMock())
+    config_entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="instance#1",
+        data={"url": "https://portainer:9443", "api_token": "x", "verify_ssl": False, "endpoint_id": "1"},
+        options={"scan_interval": 60, "image_check": False},
+    )
+    config_entry.add_to_hass(hass)
+    with patch("custom_components.swarm_containers.add_extra_js_url"):
+        assert await hass.config_entries.async_setup(config_entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    portainer.get_service_logs.assert_awaited_once()
+    assert portainer.get_service_logs.await_args.args[1] == "s9"
+    sensor = hass.states.get("sensor.docker_swarm_recent_updates")
+    assert sensor.state == "2026-10-23T08:56:52+00:00"
+    update = sensor.attributes["updates"][0]
+    assert update["name"] == "web_app" and update["source"] == "gantry" and update["stack"] == "web"
+    assert sensor.attributes["sources"] == ["gantry"]
+
+
+async def test_no_updater_reads_no_logs(hass: HomeAssistant, entry, portainer) -> None:
+    await hass.async_block_till_done(wait_background_tasks=True)
+    sensor = hass.states.get("sensor.docker_swarm_recent_updates")
+    assert sensor.state == "unknown"
+    assert sensor.attributes["sources"] == []

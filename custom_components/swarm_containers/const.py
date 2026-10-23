@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "swarm_containers"
-VERSION = "0.2.5"
+VERSION = "0.2.6"
 
 CONF_API_TOKEN = "api_token"
 CONF_ENDPOINT_ID = "endpoint_id"
@@ -12,6 +12,7 @@ CONF_VERIFY_SSL = "verify_ssl"
 CONF_IMAGE_CHECK = "image_check"
 CONF_IMAGE_CHECK_INTERVAL = "image_check_interval"
 CONF_STANDALONE = "standalone_containers"
+CONF_UPDATE_HISTORY = "update_history"
 
 DEFAULT_SCAN_INTERVAL = 60
 MIN_SCAN_INTERVAL = 30
@@ -21,6 +22,14 @@ MAX_SCAN_INTERVAL = 900
 DEFAULT_IMAGE_CHECK_INTERVAL = 6 * 3600
 MIN_IMAGE_CHECK_INTERVAL = 3600
 MAX_IMAGE_CHECK_INTERVAL = 7 * 86400
+
+# Recent updates are read from the Gantry / Watchtower logs on their own timer.
+UPDATE_HISTORY_INTERVAL = 900
+# How far back the first read of an updater's logs goes.
+UPDATE_HISTORY_LOOKBACK = 7 * 86400
+# How many updates are kept (and saved across restarts).
+UPDATE_HISTORY_LIMIT = 25
+LOG_TIMEOUT = 60
 
 # How many container stats requests may be in flight at once.
 MAX_CONCURRENT_STATS = 6

@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .client import (
@@ -30,19 +31,35 @@ from .const import (
     CONF_IMAGE_CHECK_INTERVAL,
     CONF_SCAN_INTERVAL,
     CONF_STANDALONE,
+    CONF_UPDATE_HISTORY,
     CONF_VERIFY_SSL,
     DEFAULT_IMAGE_CHECK_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MAX_CONCURRENT_IMAGE_CHECKS,
     MAX_CONCURRENT_STATS,
+    UPDATE_HISTORY_INTERVAL,
+    UPDATE_HISTORY_LIMIT,
+    UPDATE_HISTORY_LOOKBACK,
 )
-from .parse import build_snapshot, node_name
+from .parse import (
+    GANTRY,
+    build_snapshot,
+    gantry_updates,
+    log_lines,
+    merge_updates,
+    node_name,
+    updater_kind,
+    watchtower_updates,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 # Image check result when Portainer has no image_status route (Community Edition).
 UNSUPPORTED = "unsupported"
+STORAGE_VERSION = 1
+# Re-read a little before the last read, so lines logged during it aren't missed.
+LOG_OVERLAP = 120
 
 
 def stack_identifier(entry_id: str, stack: str) -> tuple[str, str]:
@@ -109,6 +126,24 @@ class SwarmContainersCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._image_targets: list[tuple[str, str, str | None]] = []
         # The environment's name, used as the node name of a host that isn't in a swarm.
         self._host_name: str | None = None
+        # Recent updates from the Gantry / Watchtower logs, saved across restarts.
+        self._history_enabled: bool = entry.options.get(CONF_UPDATE_HISTORY, True)
+        self._history_store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.updates"
+        )
+        self._history: list[dict[str, Any]] = []
+        # Unix time each updater's logs were last read up to, by "<kind>:<name>".
+        self._logs_since: dict[str, int] = {}
+        self._history_read: datetime | None = None
+        self._history_task: asyncio.Task | None = None
+        # Updaters seen in the last poll: (kind, "service"/"container", id, name, node).
+        self._updaters: list[tuple[str, str, str, str, str | None]] = []
+
+    async def _async_setup(self) -> None:
+        """Load the saved update history before the first refresh."""
+        stored = await self._history_store.async_load() or {}
+        self._history = list(stored.get("history") or [])
+        self._logs_since = dict(stored.get("since") or {})
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
@@ -163,6 +198,12 @@ class SwarmContainersCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ("container", c["full_id"], c["node"]) for c in snapshot["standalone"].values()
         ]
         self._maybe_start_image_check()
+
+        self._updaters = _find_updaters(services or [], containers)
+        snapshot["update_history"] = self._history_enabled
+        snapshot["update_sources"] = sorted({u[0] for u in self._updaters})
+        snapshot["recent_updates"] = list(self._history)
+        self._maybe_start_history_read(snapshot)
         self._remove_stale_devices(snapshot)
         return snapshot
 
@@ -282,6 +323,56 @@ class SwarmContainersCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         await self.async_request_refresh()
 
+    def _maybe_start_history_read(self, snapshot: dict[str, Any]) -> None:
+        if not self._history_enabled or not self._updaters:
+            return
+        if self._history_task and not self._history_task.done():
+            return
+        now = datetime.now(timezone.utc)
+        if self._history_read and now - self._history_read < timedelta(seconds=UPDATE_HISTORY_INTERVAL):
+            return
+        self._history_task = self.config_entry.async_create_background_task(
+            self.hass,
+            self._read_history(list(self._updaters), snapshot),
+            "swarm_containers update history",
+        )
+
+    async def _read_history(
+        self, updaters: list[tuple[str, str, str, str, str | None]], snapshot: dict[str, Any]
+    ) -> None:
+        """Read new Gantry / Watchtower log lines and record the updates they report.
+
+        ``snapshot`` is the poll that started the read; it may not be ``self.data`` yet.
+        """
+        started = datetime.now(timezone.utc)
+        now = int(started.timestamp())
+        new: list[dict[str, Any]] = []
+        for kind, target, ident, name, node in updaters:
+            key = f"{kind}:{name}"
+            since = self._logs_since.get(key, now - UPDATE_HISTORY_LOOKBACK) - LOG_OVERLAP
+            try:
+                if target == "service":
+                    data = await self.client.get_service_logs(self.endpoint_id, ident, since)
+                else:
+                    data = await self.client.get_container_logs(self.endpoint_id, ident, since, node)
+            except PortainerError as err:
+                _LOGGER.debug("Could not read %s logs: %s", name, err)
+                continue
+            lines = log_lines(data)
+            new += gantry_updates(lines) if kind == GANTRY else watchtower_updates(lines)
+            self._logs_since[key] = now
+        self._history_read = started
+        history = merge_updates(
+            self._history, [_describe(e, snapshot) for e in new], UPDATE_HISTORY_LIMIT
+        )
+        await self._history_store.async_save({"history": history, "since": self._logs_since})
+        if history == self._history:
+            return
+        self._history = history
+        current = self.data if self.data is not None else snapshot
+        current["recent_updates"] = list(history)
+        self.async_update_listeners()
+
     async def async_check_images_now(self) -> None:
         """Run the registry check now (used by the refresh button)."""
         if self._image_task and not self._image_task.done():
@@ -310,3 +401,48 @@ class SwarmContainersCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 continue
             if any(i[1].startswith(prefixes) for i in ours):
                 registry.async_update_device(device.id, remove_config_entry_id=entry_id)
+
+
+def _find_updaters(
+    services: list[dict[str, Any]], containers: list[dict[str, Any]]
+) -> list[tuple[str, str, str, str, str | None]]:
+    """Return the Gantry services and Gantry / Watchtower containers in the environment.
+
+    Swarm services are read through their service logs; a container that is a task
+    of one of them is skipped.
+    """
+    updaters: list[tuple[str, str, str, str, str | None]] = []
+    for service in services:
+        spec = service.get("Spec") or {}
+        image = ((spec.get("TaskTemplate") or {}).get("ContainerSpec") or {}).get("Image", "")
+        kind = updater_kind(image)
+        if kind:
+            updaters.append((kind, "service", service.get("ID", ""), spec.get("Name") or kind, None))
+    for container in containers:
+        labels = container.get("Labels") or {}
+        if labels.get("com.docker.swarm.service.id") or container.get("State") != "running":
+            continue
+        kind = updater_kind(container.get("Image", ""))
+        if kind:
+            node = node_name(container)
+            name = str((container.get("Names") or [kind])[0]).lstrip("/")
+            updaters.append(
+                (kind, "container", container.get("Id", ""), name, None if node == "unknown" else node)
+            )
+    return updaters
+
+
+def _describe(event: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Add the stack, image and nodes of the updated service or container."""
+    service = snapshot["services"].get(event["name"])
+    if service:
+        return {**event, "stack": service["stack"], "image": service["image"], "nodes": service["nodes"]}
+    for container in snapshot["standalone"].values():
+        if container["name"] == event["name"]:
+            return {
+                **event,
+                "stack": container["stack"],
+                "image": container["image"] or event.get("image"),
+                "nodes": [container["node"]],
+            }
+    return {"stack": None, "nodes": [], **event}

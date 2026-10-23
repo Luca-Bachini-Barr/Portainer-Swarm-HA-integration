@@ -6,7 +6,7 @@
  * they never talk to Portainer.
  */
 
-const VERSION = "0.2.5";
+const VERSION = "0.2.6";
 const PLATFORM = "swarm_containers";
 const MODEL = {
   swarm: "Swarm",
@@ -295,8 +295,39 @@ class SwarmOverviewCard extends SwarmBaseCard {
         { name: "title", selector: { text: {} } },
         ENVIRONMENT_FIELD,
         { name: "show_problems", default: true, selector: { boolean: {} } },
+        { name: "show_recent_updates", default: false, selector: { boolean: {} } },
+        { name: "recent_updates_count", default: 5, selector: { number: { min: 1, max: 25, mode: "box" } } },
       ],
     };
+  }
+
+  /** The last updates Gantry or Watchtower made, from the recent updates sensor. */
+  _recentUpdates(e) {
+    const hass = this._hass;
+    const sensor = st(hass, e.recent_updates);
+    if (!sensor) return "";
+    const a = sensor.attributes || {};
+    const count = Math.max(1, num(this._config.recent_updates_count) || 5);
+    const updates = (a.updates || []).slice(0, count);
+    let body;
+    if (a.enabled === false) {
+      body = `<div class="empty small">Update history is turned off in the integration options.</div>`;
+    } else if (!updates.length) {
+      body = `<div class="empty small">${(a.sources || []).length ? "No updates recorded yet." : "No Gantry or Watchtower found in this environment."}</div>`;
+    } else {
+      body = updates.map((u) => `
+        <div class="row" data-entity="${esc(e.recent_updates)}" title="${esc(u.when ? new Date(u.when).toLocaleString() : "")}">
+          <ha-icon class="src" icon="mdi:arrow-up-circle"></ha-icon>
+          <div class="name">${esc(u.name)}${u.image ? ` <span class="muted small">${esc(u.image)}</span>` : ""}</div>
+          <span class="chip">${esc(u.source || "update")}</span>
+          <span class="muted small num">${esc(fmtAgo(u.when))}</span>
+        </div>`).join("");
+    }
+    return `<div class="group">Recent updates</div>${body}`;
+  }
+
+  _css() {
+    return `.src { --mdc-icon-size: 18px; color: var(--success-color, #43a047); flex: none; }`;
   }
 
   _render() {
@@ -359,6 +390,7 @@ class SwarmOverviewCard extends SwarmBaseCard {
       ${showProblems && reasons.length
         ? `<ul class="problems">${reasons.map((r) => `<li><ha-icon icon="mdi:alert"></ha-icon>${esc(r)}</li>`).join("")}</ul>`
         : ""}
+      ${this._config.show_recent_updates ? this._recentUpdates(e) : ""}
     `);
   }
 }
@@ -771,7 +803,7 @@ class SwarmUpdatesCard extends SwarmBaseCard {
 /* ---------- registration ---------- */
 
 const CARDS = [
-  ["swarm-overview-card", SwarmOverviewCard, "Swarm overview", "Swarm health, nodes, services, tasks, updates and failures at a glance."],
+  ["swarm-overview-card", SwarmOverviewCard, "Swarm overview", "Swarm health, nodes, services, tasks, updates and failures at a glance, optionally with the last Gantry / Watchtower updates."],
   ["swarm-node-card", SwarmNodeCard, "Swarm node", "One swarm node: role, leader, containers, CPU, memory and top containers."],
   ["swarm-stacks-card", SwarmStacksCard, "Swarm stacks", "Every stack with its status, services, containers and pending updates."],
   ["swarm-services-card", SwarmServicesCard, "Swarm services", "Swarm services with replicas, placement, CPU and memory."],

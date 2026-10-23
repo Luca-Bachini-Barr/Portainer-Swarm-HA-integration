@@ -18,6 +18,7 @@ Home Assistant's built-in Portainer integration fails on swarm environments beca
 | `sensor.docker_swarm_task_failures_24h` | Tasks that failed or were rejected in the last 24 hours | per service |
 | `binary_sensor.docker_swarm_problem` | On when a node is not ready, a service is down, degraded or has a paused update, or a container is unhealthy | `reasons` |
 | `button.docker_swarm_check_for_image_updates` | Runs the image check now | |
+| `sensor.docker_swarm_recent_updates` | When the newest recorded Gantry / Watchtower update happened | The last 25 updates in `updates` (name, stack, image, nodes, source, when) |
 
 ### Each node
 
@@ -60,7 +61,7 @@ The cards are bundled with the integration, which adds them to your dashboard re
 
 | Card | Shows |
 |---|---|
-| `custom:swarm-overview-card` | Swarm health, nodes ready, services, stacks, tasks, updates, failures, and the list of problems |
+| `custom:swarm-overview-card` | Swarm health, nodes ready, services, stacks, tasks, updates, failures, and the list of problems; `show_recent_updates: true` adds the last Gantry / Watchtower updates |
 | `custom:swarm-node-card` | One node: role, leader, running/stopped/unhealthy containers, tasks, CPU and memory bars, images/volumes/networks, top containers (`mode: compact / standard / detailed`) |
 | `custom:swarm-stacks-card` | Every stack with status, services running, containers, updates and failures; `show_services: true` lists each stack's services with their nodes |
 | `custom:swarm-services-card` | Services with replicas, the nodes they run on, CPU and memory; filter by `stack` or `node`, `group_by: stack / node / none`, `sort_by: name / status / cpu / memory`, `include_standalone: true` adds standalone containers |
@@ -80,6 +81,8 @@ With more than one Portainer environment set up (for example a swarm and a NAS),
 type: custom:swarm-overview-card
 environment: <Docker NAS device>
 ```
+
+Set `show_recent_updates: true` on the overview card to list the last updates Gantry or Watchtower made below the stats (`recent_updates_count`, default 5).
 
 ## Install
 
@@ -103,12 +106,14 @@ You will be asked for:
 | Check for image updates | on |
 | Image check interval | 6 hours (minimum 1 hour). Each check asks the registry once per image |
 | Create devices for standalone containers | on |
+| Record recent updates from Gantry / Watchtower | on |
 
 ## How values are measured
 
 - **CPU** is measured between two polls, so it shows after the second update. Service and container CPU are `docker stats` style (100% = one core). Node CPU is the share of the whole node used by its containers.
 - **Memory** excludes the page cache, as `docker stats` does. Node memory is the sum of its containers against the node's total RAM.
 - **Image updates** come from Portainer's registry check. Services and containers whose image is pinned or unreachable show as unknown. The check is a Portainer Business Edition feature: with Community Edition the integration notices after the first check, stops asking, and leaves image updates unknown (the updates sensor gets `supported: false`).
+- **Recent updates** come from the logs of the updaters running in the environment: a [Gantry](https://github.com/shizunge/gantry) service (its "N service(s) updated: …" lines) or a [Watchtower](https://containrrr.dev/watchtower/) container (its "Creating /<name>" lines). The logs are read every 15 minutes, the first time going back 7 days, and only new lines after that. The last 25 updates are saved, so they survive restarts and updater log rotation. Environments without either updater record nothing.
 - **Task failures** count tasks that ended `failed` or `rejected` in the last 24 hours, from the swarm's task history.
 
 ## Security

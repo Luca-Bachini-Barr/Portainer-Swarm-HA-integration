@@ -6,6 +6,7 @@ Pure functions with no Home Assistant imports so they can be unit tested.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import re
 from typing import Any
 
 NO_STACK = "standalone"
@@ -602,6 +603,101 @@ def build_snapshot(
         "unhealthy": sum(t["unhealthy"] for t in node_tables.values()),
     }
     return snapshot, new_cpu
+
+
+# ---------- Update history (Gantry / Watchtower logs) ----------
+
+GANTRY = "gantry"
+WATCHTOWER = "watchtower"
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_GANTRY_UPDATED = re.compile(r"\d+ service\(s\) updated: (.+)$")
+_WATCHTOWER_FOUND = re.compile(r'msg="Found new (\S+) image')
+_WATCHTOWER_CREATING = re.compile(r'msg="Creating /([^"]+)"')
+
+
+def updater_kind(image: str) -> str | None:
+    """Return GANTRY or WATCHTOWER when an image is one of those updaters."""
+    repo = short_image(image).rsplit(":", 1)[0].rsplit("/", 1)[-1].lower()
+    if repo == GANTRY:
+        return GANTRY
+    if repo == WATCHTOWER:
+        return WATCHTOWER
+    return None
+
+
+def log_lines(data: bytes) -> list[tuple[datetime | None, str]]:
+    """Split Docker log output into (timestamp, text) lines.
+
+    Without a TTY Docker multiplexes stdout and stderr into frames, each with an
+    8-byte header (stream, three zero bytes, big-endian length). Lines start with the
+    RFC 3339 timestamp that ``timestamps=1`` adds.
+    """
+    chunks: list[bytes] = []
+    if len(data) >= 8 and data[0] in (0, 1, 2) and data[1:4] == b"\0\0\0":
+        pos = 0
+        while pos + 8 <= len(data):
+            size = int.from_bytes(data[pos + 4 : pos + 8], "big")
+            chunks.append(data[pos + 8 : pos + 8 + size])
+            pos += 8 + size
+    else:
+        chunks.append(data)
+    lines: list[tuple[datetime | None, str]] = []
+    for line in b"".join(chunks).decode("utf-8", "replace").splitlines():
+        line = _ANSI.sub("", line).strip()
+        if not line:
+            continue
+        stamp, _, text = line.partition(" ")
+        when = parse_time(stamp)
+        lines.append((when, text) if when else (None, line))
+    return lines
+
+
+def gantry_updates(lines: list[tuple[datetime | None, str]]) -> list[dict[str, Any]]:
+    """Return the services each Gantry run reports as updated."""
+    events = []
+    for when, text in lines:
+        match = _GANTRY_UPDATED.search(text)
+        if not match or when is None:
+            continue
+        for name in match.group(1).replace(",", " ").split():
+            events.append({"name": name, "when": _iso(when), "source": GANTRY, "image": None})
+    return events
+
+
+def watchtower_updates(lines: list[tuple[datetime | None, str]]) -> list[dict[str, Any]]:
+    """Return the containers Watchtower recreated with a new image.
+
+    Watchtower logs "Found new <image> image" for each image it pulled, then
+    "Creating /<name>" for each container it replaces. Several containers can share
+    an image, so the image is a best guess; callers prefer the container's own.
+    """
+    events = []
+    found: str | None = None
+    for when, text in lines:
+        match = _WATCHTOWER_FOUND.search(text)
+        if match:
+            found = match.group(1)
+            continue
+        match = _WATCHTOWER_CREATING.search(text)
+        if match and when is not None:
+            events.append({"name": match.group(1), "when": _iso(when), "source": WATCHTOWER, "image": found})
+    return events
+
+
+def merge_updates(
+    history: list[dict[str, Any]], new: list[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
+    """Add new update events to the history, newest first, without duplicates.
+
+    Re-reading overlapping logs reports the same update again; it has the same
+    source, name and time to the minute.
+    """
+    seen: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for event in [*history, *new]:
+        key = (event.get("source") or "", event.get("name") or "", (event.get("when") or "")[:16])
+        seen.setdefault(key, event)
+    merged = sorted(seen.values(), key=lambda e: e.get("when") or "", reverse=True)
+    return merged[:limit]
 
 
 def build_tables(
