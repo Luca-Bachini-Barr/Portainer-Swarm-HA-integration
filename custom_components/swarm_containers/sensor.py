@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -33,6 +34,12 @@ class SwarmSensorDescription(SensorEntityDescription):
     attrs_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     # Only meaningful in a swarm; not created for a single Docker host.
     swarm_only: bool = False
+
+
+def _newest_update(d: dict[str, Any]) -> datetime | None:
+    """Return when the newest recorded update happened."""
+    updates = d.get("recent_updates") or []
+    return datetime.fromisoformat(updates[0]["when"]) if updates and updates[0].get("when") else None
 
 
 def _pct(**kwargs: Any) -> dict[str, Any]:
@@ -116,6 +123,18 @@ SWARM_SENSORS: tuple[SwarmSensorDescription, ...] = (
             "supported": d.get("image_check_supported", True),
         },
         **_count(),
+    ),
+    SwarmSensorDescription(
+        key="recent_updates",
+        translation_key="recent_updates",
+        icon="mdi:update",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=_newest_update,
+        attrs_fn=lambda d: {
+            "updates": d.get("recent_updates", []),
+            "sources": d.get("update_sources", []),
+            "enabled": d.get("update_history", True),
+        },
     ),
     SwarmSensorDescription(
         key="task_failures",
