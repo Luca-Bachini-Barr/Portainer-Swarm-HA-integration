@@ -2,11 +2,12 @@
  * Swarm Containers dashboard cards.
  *
  * Served by the swarm_containers integration, which registers this file as a
- * dashboard resource. The cards only read entities Home Assistant already has;
- * they never talk to Portainer.
+ * dashboard resource. The cards read entities Home Assistant already has and
+ * never talk to Portainer; with `show_actions` they call the integration's
+ * management actions (which need "Allow management actions" in its options).
  */
 
-const VERSION = "0.2.6";
+const VERSION = "0.3.0";
 const PLATFORM = "swarm_containers";
 const MODEL = {
   swarm: "Swarm",
@@ -206,7 +207,48 @@ const BASE_CSS = `
   button.action { border: none; border-radius: 16px; padding: 4px 12px; cursor: pointer; font: inherit; font-size: 0.85em;
                   background: var(--primary-color); color: var(--text-primary-color, #fff); display: inline-flex; gap: 4px; align-items: center; }
   button.action ha-icon { --mdc-icon-size: 16px; }
+  .more { --mdc-icon-size: 18px; color: var(--secondary-text-color); padding: 2px; border-radius: 50%; flex: none; }
+  .more:hover, .more.open { background: var(--divider-color); color: var(--primary-text-color); }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 4px 2px 8px 18px; }
+  .actions button { border: 1px solid var(--divider-color); border-radius: 14px; padding: 3px 10px; cursor: pointer; font: inherit;
+                    font-size: 0.8em; background: var(--card-background-color); color: var(--primary-text-color);
+                    display: inline-flex; gap: 4px; align-items: center; }
+  .actions button ha-icon { --mdc-icon-size: 15px; }
+  .actions button.danger { color: var(--error-color, #db4437); }
+  .actions button.confirm { background: var(--warning-color, #ffa600); color: #000; border-color: transparent; }
+  .actions button.danger.confirm { background: var(--error-color, #db4437); color: #fff; }
+  .actions button:disabled { opacity: 0.6; cursor: progress; }
+  .actions input { width: 52px; font: inherit; font-size: 0.85em; padding: 2px 4px; border-radius: 6px;
+                   border: 1px solid var(--divider-color); background: var(--card-background-color); color: var(--primary-text-color); }
+  .actions .msg { font-size: 0.8em; flex-basis: 100%; }
+  .actions .msg.err { color: var(--error-color, #db4437); }
 `;
+
+/*
+ * Management actions offered per kind of row. The first tap turns the button into
+ * "Confirm …?"; nothing runs until that is tapped.
+ */
+const ACTIONS = {
+  restart: { icon: "mdi:restart", label: "Restart", busy: "Restarting…", service: "restart" },
+  redeploy: { icon: "mdi:cloud-refresh", label: "Redeploy", title: "Redeploy from the compose file, pulling newer images", busy: "Redeploying…", service: "redeploy_stack", data: { pull_image: true } },
+  stop: { icon: "mdi:stop", label: "Stop", busy: "Stopping…", service: "stop", danger: true },
+  start: { icon: "mdi:play", label: "Start", busy: "Starting…", service: "start" },
+  scale: { icon: "mdi:arrow-expand-vertical", label: "Scale", busy: "Scaling…", service: "scale_service", input: "replicas" },
+  rollback: { icon: "mdi:undo-variant", label: "Roll back", busy: "Rolling back…", service: "rollback_service" },
+  recreate: { icon: "mdi:autorenew", label: "Recreate", title: "Remove the service, then redeploy its stack so it is created fresh", busy: "Recreating…", service: "remove_service", data: { recreate: true }, danger: true },
+  remove: { icon: "mdi:delete", label: "Remove", title: "Remove the service (a stack redeploy brings it back)", busy: "Removing…", service: "remove_service", data: { recreate: false }, danger: true },
+};
+
+/** The actions that make sense for a row: kind is stack / service / container. */
+function actionsFor(kind, { state, mode, managed } = {}) {
+  if (kind === "stack") {
+    const list = state === "stopped" ? [] : ["restart"];
+    if (managed !== false) list.push("redeploy", state === "stopped" ? "start" : "stop");
+    return list;
+  }
+  if (kind === "service") return ["restart", ...(mode === "global" ? [] : ["scale"]), "rollback", "recreate", "remove"];
+  return state === "running" ? ["restart", "stop"] : ["start"];
+}
 
 /** Shared base: re-renders only when the entities a card reads have changed. */
 class SwarmBaseCard extends HTMLElement {
@@ -214,6 +256,12 @@ class SwarmBaseCard extends HTMLElement {
     super();
     this.attachShadow({ mode: "open" });
     this._sig = "";
+    // Management menu state, kept across re-renders: open row, pending confirmation,
+    // running action and last result per row key.
+    this._open = null;
+    this._confirm = null;
+    this._busy = {};
+    this._msg = {};
   }
 
   setConfig(config) {
@@ -267,6 +315,107 @@ class SwarmBaseCard extends HTMLElement {
   _paint(html) {
     this.shadowRoot.innerHTML = `<style>${BASE_CSS}${this._css ? this._css() : ""}</style><ha-card>${html}</ha-card>`;
     this._bindClicks();
+    this._bindActions();
+  }
+
+  /** True when this row can be managed (the integration made a restart button for it). */
+  _manageable(item) {
+    return Boolean(this._config.show_actions && item && item.e.btn_restart);
+  }
+
+  /** The ⋮ toggle at the end of a manageable row. */
+  _menuToggle(key) {
+    return `<ha-icon class="more ${this._open === key ? "open" : ""}" data-menu="${esc(key)}" icon="mdi:dots-vertical" title="Actions"></ha-icon>`;
+  }
+
+  /** The action strip under an open row. */
+  _menuStrip(key, deviceId, actions, defaults = {}) {
+    if (this._open !== key) return "";
+    const busy = this._busy[key];
+    const buttons = actions.map((name) => {
+      const a = ACTIONS[name];
+      const confirming = this._confirm && this._confirm.key === key && this._confirm.action === name;
+      const label = busy === name ? a.busy : confirming ? `Confirm ${a.label.toLowerCase()}?` : a.label;
+      // Actions with an input (scale) show it once tapped, prefilled with the current value.
+      if (a.input && confirming && this._confirm.value === undefined) this._confirm.value = defaults[a.input] ?? 1;
+      const input = a.input && confirming
+        ? `<input type="number" min="0" max="100" data-input="${esc(key)}:${name}" value="${esc(this._confirm.value)}">`
+        : "";
+      return `${input}<button class="${a.danger ? "danger" : ""} ${confirming ? "confirm" : ""}" ${busy ? "disabled" : ""}
+          data-act="${name}" data-key="${esc(key)}" data-device="${esc(deviceId)}" title="${esc(a.title || a.label)}">
+          <ha-icon icon="${a.icon}"></ha-icon>${esc(label)}</button>`;
+    }).join("");
+    const msg = this._msg[key];
+    return `<div class="actions">${buttons}${msg ? `<span class="msg ${msg.error ? "err" : "muted"}">${esc(msg.text)}</span>` : ""}</div>`;
+  }
+
+  _bindActions() {
+    const root = this.shadowRoot;
+    root.querySelectorAll("[data-menu]").forEach((el) => {
+      el.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const key = el.dataset.menu;
+        this._open = this._open === key ? null : key;
+        this._confirm = null;
+        this._render();
+      });
+    });
+    root.querySelectorAll("[data-input]").forEach((el) => {
+      el.addEventListener("click", (ev) => ev.stopPropagation());
+      el.addEventListener("input", () => {
+        if (this._confirm) this._confirm.value = el.value;
+      });
+    });
+    root.querySelectorAll("[data-act]").forEach((el) => {
+      el.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        this._onAction(el.dataset.key, el.dataset.act, el.dataset.device);
+      });
+    });
+  }
+
+  _onAction(key, name, deviceId) {
+    const a = ACTIONS[name];
+    if (this._busy[key]) return;
+    const confirming = this._confirm && this._confirm.key === key && this._confirm.action === name;
+    if (!confirming) {
+      // First tap: ask for confirmation, which lapses after a few seconds.
+      this._confirm = { key, action: name, value: undefined };
+      clearTimeout(this._confirmTimer);
+      this._confirmTimer = setTimeout(() => {
+        if (this._confirm && this._confirm.key === key && this._confirm.action === name) {
+          this._confirm = null;
+          this._render();
+        }
+      }, a.input ? 15000 : 5000);
+      delete this._msg[key];
+      this._render();
+      return;
+    }
+    const data = { device_id: deviceId, ...(a.data || {}) };
+    if (a.input) {
+      const value = Number(this._confirm.value);
+      if (!Number.isInteger(value) || value < 0) {
+        this._msg[key] = { error: true, text: "Enter a whole number of replicas." };
+        this._render();
+        return;
+      }
+      data[a.input] = value;
+    }
+    this._confirm = null;
+    this._busy[key] = name;
+    this._render();
+    this._hass.callService(PLATFORM, a.service, data).then(
+      () => {
+        this._msg[key] = { text: `${a.label}: done.` };
+      },
+      (err) => {
+        this._msg[key] = { error: true, text: err?.message || String(err) };
+      },
+    ).finally(() => {
+      delete this._busy[key];
+      this._render();
+    });
   }
 
   _nodeByDevice(deviceId) {
@@ -517,6 +666,7 @@ class SwarmStacksCard extends SwarmBaseCard {
         { name: "show_services", default: false, selector: { boolean: {} } },
         { name: "hide_stopped", default: false, selector: { boolean: {} } },
         { name: "sort_by", default: "status", selector: { select: { mode: "dropdown", options: ["status", "name"] } } },
+        { name: "show_actions", default: false, selector: { boolean: {} } },
       ],
     };
   }
@@ -552,17 +702,22 @@ class SwarmStacksCard extends SwarmBaseCard {
           ${updates.length ? `<span class="chip warn"><ha-icon icon="mdi:arrow-up-circle"></ha-icon>${updates.length}</span>` : ""}
           ${s.a.failures_24h ? `<span class="chip bad"><ha-icon icon="mdi:alert-circle"></ha-icon>${esc(s.a.failures_24h)}</span>` : ""}
           ${counts}
-        </div>`;
+          ${this._manageable(s) ? this._menuToggle(`stack:${s.name}`) : ""}
+        </div>
+        ${this._manageable(s) ? this._menuStrip(`stack:${s.name}`, s.deviceId, actionsFor("stack", { state: s.state, managed: s.a.managed })) : ""}`;
       if (this._config.show_services && host) {
         row += (s.a.services || []).map((name) => {
           const c = containerByName(name);
           if (!c) return "";
           const cstate = val(hass, c.e.container_state);
+          const key = `container:${c.deviceId}`;
           return `<div class="row small indent" data-entity="${esc(c.e.container_state)}">
               <div class="dot" style="background:${stateColor(cstate)}"></div>
               <span class="name">${esc(name)}</span>
               <span class="num muted">${esc(cstate ?? "–")}</span>
-            </div>`;
+              ${this._manageable(c) ? this._menuToggle(key) : ""}
+            </div>
+            ${this._manageable(c) ? this._menuStrip(key, c.deviceId, actionsFor("container", { state: cstate })) : ""}`;
         }).join("");
       } else if (this._config.show_services) {
         row += (s.a.services || []).map((name) => {
@@ -572,12 +727,15 @@ class SwarmStacksCard extends SwarmBaseCard {
           const sd = attr(hass, svc.e.service_status, "desired");
           const sstate = val(hass, svc.e.service_status);
           const nodes = attr(hass, svc.e.service_status, "nodes") || [];
+          const key = `service:${name}`;
           return `<div class="row small indent" data-entity="${esc(svc.e.service_status)}">
               <div class="dot" style="background:${stateColor(sstate)}"></div>
               <span class="name">${esc(name.startsWith(`${s.name}_`) ? name.slice(s.name.length + 1) : name)}</span>
               <span class="pills">${nodes.map((n) => `<span class="chip">${esc(n)}</span>`).join("")}</span>
               <span class="num muted">${esc(sa ?? "–")}/${esc(sd ?? "–")}</span>
-            </div>`;
+              ${this._manageable(svc) ? this._menuToggle(key) : ""}
+            </div>
+            ${this._manageable(svc) ? this._menuStrip(key, svc.deviceId, actionsFor("service", { mode: attr(hass, svc.e.service_status, "mode") }), { replicas: sd }) : ""}`;
         }).join("");
       }
       return row;
@@ -611,6 +769,7 @@ class SwarmServicesCard extends SwarmBaseCard {
         { name: "sort_by", default: "name", selector: { select: { mode: "dropdown", options: ["name", "status", "cpu", "memory"] } } },
         { name: "include_standalone", default: false, selector: { boolean: {} } },
         { name: "show_resources", default: true, selector: { boolean: {} } },
+        { name: "show_actions", default: false, selector: { boolean: {} } },
       ],
     };
   }
@@ -621,6 +780,7 @@ class SwarmServicesCard extends SwarmBaseCard {
       const a = attr(hass, s.e.service_status, "stack") !== undefined ? st(hass, s.e.service_status).attributes : {};
       return {
         kind: "service",
+        item: s,
         name: s.name,
         entity: s.e.service_status,
         state: val(hass, s.e.service_status),
@@ -642,6 +802,7 @@ class SwarmServicesCard extends SwarmBaseCard {
         const health = val(hass, c.e.health);
         rows.push({
           kind: "container",
+          item: c,
           // Devices are named "<node> <container>"; node names can contain spaces.
           name: a.node && c.name.startsWith(`${a.node} `)
             ? c.name.slice(a.node.length + 1)
@@ -685,6 +846,8 @@ class SwarmServicesCard extends SwarmBaseCard {
     const rowHtml = (r, group) => {
       const short = groupBy === "stack" && r.name.startsWith(`${group}_`) ? r.name.slice(group.length + 1) : r.name;
       const healthy = r.state === "running" || r.state === "updating";
+      // Grouped by node, a service can appear more than once; the key keeps one menu per row group.
+      const key = `${r.kind}:${r.item.deviceId}:${group}`;
       return `<div class="row" data-entity="${esc(r.entity)}" title="${esc(STATE_LABEL[r.state] || r.state || "")}">
           <div class="dot" style="background:${stateColor(r.state)}"></div>
           <span class="name">${esc(short)}</span>
@@ -693,7 +856,9 @@ class SwarmServicesCard extends SwarmBaseCard {
           ${groupBy !== "node" ? `<span class="pills">${r.nodes.map((n) => `<span class="chip">${esc(n)}</span>`).join("")}</span>` : ""}
           <span class="num small ${healthy ? "muted" : ""}" style="min-width:30px${healthy ? "" : `;color:${stateColor(r.state)}`}" title="${r.mode === "global" ? "Global service" : "Running / desired"}">${r.kind === "container" ? "" : `${esc(r.running ?? "–")}/${esc(r.desired ?? "–")}${r.mode === "global" ? "G" : ""}`}</span>
           ${showRes ? `<span class="num muted small" style="min-width:40px">${fmtPct(r.cpu)}</span><span class="num muted small" style="min-width:52px">${fmtMiB(r.memory)}</span>` : ""}
-        </div>`;
+          ${this._manageable(r.item) ? this._menuToggle(key) : ""}
+        </div>
+        ${this._manageable(r.item) ? this._menuStrip(key, r.item.deviceId, actionsFor(r.kind, { state: r.state, mode: r.mode }), { replicas: r.desired }) : ""}`;
     };
 
     let body = "";
