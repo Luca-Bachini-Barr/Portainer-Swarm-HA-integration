@@ -89,7 +89,7 @@ data:
 
 Each action re-reads the spec it changes from Portainer just before changing it. Stacks deployed outside Portainer can be restarted but not redeployed, stopped or started. Git-based stacks can't be redeployed from here. Portainer's own server and agent services can't be stopped, scaled to 0 or removed, because that would cut Home Assistant off from the environment.
 
-With `show_actions: true`, the stacks and services cards add a ⋮ menu to each row (restart, redeploy, stop/start, scale, roll back, recreate, remove, depending on the row). Every action needs a second tap to confirm.
+With `show_actions: true`, the stacks and services cards show action icons at the end of each row (restart, redeploy, stop/start, scale, roll back, recreate, remove, depending on the row). Every action needs a second tap: the first turns the icon into a "Confirm …?" button. On narrow cards set `actions_layout: menu` to put the actions behind a ⋮ menu instead.
 
 ## Dashboard cards
 

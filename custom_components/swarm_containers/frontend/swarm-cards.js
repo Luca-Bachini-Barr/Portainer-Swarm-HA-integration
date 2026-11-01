@@ -7,7 +7,7 @@
  * management actions (which need "Allow management actions" in its options).
  */
 
-const VERSION = "0.3.0";
+const VERSION = "0.3.1";
 const PLATFORM = "swarm_containers";
 const MODEL = {
   swarm: "Swarm",
@@ -222,6 +222,19 @@ const BASE_CSS = `
                    border: 1px solid var(--divider-color); background: var(--card-background-color); color: var(--primary-text-color); }
   .actions .msg { font-size: 0.8em; flex-basis: 100%; }
   .actions .msg.err { color: var(--error-color, #db4437); }
+  .inline-actions { display: flex; gap: 2px; align-items: center; flex: none; }
+  .inline-actions button { border: none; border-radius: 12px; padding: 2px; cursor: pointer; font: inherit; font-size: 0.75em;
+                           background: none; color: var(--secondary-text-color); display: inline-flex; gap: 3px; align-items: center; }
+  .inline-actions button ha-icon { --mdc-icon-size: 18px; }
+  .inline-actions button:hover { background: var(--divider-color); color: var(--primary-text-color); }
+  .inline-actions button.danger { color: color-mix(in srgb, var(--error-color, #db4437) 75%, var(--secondary-text-color)); }
+  .inline-actions button.confirm { background: var(--warning-color, #ffa600); color: #000; padding: 2px 8px 2px 4px; }
+  .inline-actions button.danger.confirm { background: var(--error-color, #db4437); color: #fff; }
+  .inline-actions button:disabled { opacity: 0.6; cursor: progress; }
+  .inline-actions input { width: 44px; font: inherit; font-size: 0.8em; padding: 1px 3px; border-radius: 6px;
+                          border: 1px solid var(--divider-color); background: var(--card-background-color); color: var(--primary-text-color); }
+  .row-msg { font-size: 0.8em; padding: 0 2px 4px 18px; }
+  .row-msg.err { color: var(--error-color, #db4437); }
 `;
 
 /*
@@ -323,30 +336,43 @@ class SwarmBaseCard extends HTMLElement {
     return Boolean(this._config.show_actions && item && item.e.btn_restart);
   }
 
-  /** The ⋮ toggle at the end of a manageable row. */
-  _menuToggle(key) {
-    return `<ha-icon class="more ${this._open === key ? "open" : ""}" data-menu="${esc(key)}" icon="mdi:dots-vertical" title="Actions"></ha-icon>`;
+  /** Inline icons (default) or a ⋮ menu, from the `actions_layout` option. */
+  get _inline() {
+    return (this._config.actions_layout || "inline") !== "menu";
   }
 
-  /** The action strip under an open row. */
-  _menuStrip(key, deviceId, actions, defaults = {}) {
-    if (this._open !== key) return "";
-    const busy = this._busy[key];
-    const buttons = actions.map((name) => {
-      const a = ACTIONS[name];
-      const confirming = this._confirm && this._confirm.key === key && this._confirm.action === name;
-      const label = busy === name ? a.busy : confirming ? `Confirm ${a.label.toLowerCase()}?` : a.label;
-      // Actions with an input (scale) show it once tapped, prefilled with the current value.
-      if (a.input && confirming && this._confirm.value === undefined) this._confirm.value = defaults[a.input] ?? 1;
-      const input = a.input && confirming
-        ? `<input type="number" min="0" max="100" data-input="${esc(key)}:${name}" value="${esc(this._confirm.value)}">`
-        : "";
-      return `${input}<button class="${a.danger ? "danger" : ""} ${confirming ? "confirm" : ""}" ${busy ? "disabled" : ""}
-          data-act="${name}" data-key="${esc(key)}" data-device="${esc(deviceId)}" title="${esc(a.title || a.label)}">
-          <ha-icon icon="${a.icon}"></ha-icon>${esc(label)}</button>`;
-    }).join("");
+  /** What goes at the end of a manageable row: the action icons, or the ⋮ toggle. */
+  _rowActions(key, deviceId, actions, defaults = {}) {
+    if (!this._inline) {
+      return `<ha-icon class="more ${this._open === key ? "open" : ""}" data-menu="${esc(key)}" icon="mdi:dots-vertical" title="Actions"></ha-icon>`;
+    }
+    return `<span class="inline-actions">${actions.map((name) => this._actionButton(key, deviceId, name, defaults, true)).join("")}</span>`;
+  }
+
+  /** What goes under a manageable row: the open menu strip, or the last result inline. */
+  _rowBelow(key, deviceId, actions, defaults = {}) {
     const msg = this._msg[key];
-    return `<div class="actions">${buttons}${msg ? `<span class="msg ${msg.error ? "err" : "muted"}">${esc(msg.text)}</span>` : ""}</div>`;
+    const text = msg ? `<span class="msg ${msg.error ? "err" : "muted"}">${esc(msg.text)}</span>` : "";
+    if (this._inline) return msg ? `<div class="row-msg ${msg.error ? "err" : "muted"}">${esc(msg.text)}</div>` : "";
+    if (this._open !== key) return "";
+    return `<div class="actions">${actions.map((name) => this._actionButton(key, deviceId, name, defaults, false)).join("")}${text}</div>`;
+  }
+
+  /** One action button; `compact` shows only the icon until it asks for confirmation. */
+  _actionButton(key, deviceId, name, defaults, compact) {
+    const a = ACTIONS[name];
+    const busy = this._busy[key];
+    const confirming = this._confirm && this._confirm.key === key && this._confirm.action === name;
+    let label = busy === name ? a.busy : confirming ? `Confirm ${a.label.toLowerCase()}?` : a.label;
+    if (compact && !confirming && busy !== name) label = "";
+    // Actions with an input (scale) show it once tapped, prefilled with the current value.
+    if (a.input && confirming && this._confirm.value === undefined) this._confirm.value = defaults[a.input] ?? 1;
+    const input = a.input && confirming
+      ? `<input type="number" min="0" max="100" data-input="${esc(key)}:${name}" value="${esc(this._confirm.value)}">`
+      : "";
+    return `${input}<button class="${a.danger ? "danger" : ""} ${confirming ? "confirm" : ""}" ${busy ? "disabled" : ""}
+        data-act="${name}" data-key="${esc(key)}" data-device="${esc(deviceId)}" title="${esc(a.title || a.label)}">
+        <ha-icon icon="${busy === name ? "mdi:timer-sand" : a.icon}"></ha-icon>${esc(label)}</button>`;
   }
 
   _bindActions() {
@@ -407,7 +433,14 @@ class SwarmBaseCard extends HTMLElement {
     this._render();
     this._hass.callService(PLATFORM, a.service, data).then(
       () => {
-        this._msg[key] = { text: `${a.label}: done.` };
+        const msg = { text: `${a.label}: done.` };
+        this._msg[key] = msg;
+        setTimeout(() => {
+          if (this._msg[key] === msg) {
+            delete this._msg[key];
+            this._render();
+          }
+        }, 6000);
       },
       (err) => {
         this._msg[key] = { error: true, text: err?.message || String(err) };
@@ -667,6 +700,7 @@ class SwarmStacksCard extends SwarmBaseCard {
         { name: "hide_stopped", default: false, selector: { boolean: {} } },
         { name: "sort_by", default: "status", selector: { select: { mode: "dropdown", options: ["status", "name"] } } },
         { name: "show_actions", default: false, selector: { boolean: {} } },
+        { name: "actions_layout", default: "inline", selector: { select: { mode: "dropdown", options: ["inline", "menu"] } } },
       ],
     };
   }
@@ -693,6 +727,7 @@ class SwarmStacksCard extends SwarmBaseCard {
         ? `<span class="num muted small" title="Containers running / total" style="min-width:34px"><ha-icon icon="mdi:docker" style="--mdc-icon-size:14px"></ha-icon>${esc(s.a.containers ?? 0)}/${esc(s.a.desired ?? 0)}</span>`
         : `<span class="num muted small" title="Services running">${esc(s.a.services_running ?? 0)}/${esc((s.a.services || []).length)} svc</span>
           <span class="num muted small" title="Containers" style="min-width:34px"><ha-icon icon="mdi:docker" style="--mdc-icon-size:14px"></ha-icon>${esc(s.a.containers ?? 0)}</span>`;
+      const stackActions = actionsFor("stack", { state: s.state, managed: s.a.managed });
       let row = `
         <div class="row" data-entity="${esc(s.e.stack_status)}" title="${esc(STATE_LABEL[s.state] || s.state || "")}">
           <div class="dot" style="background:${stateColor(s.state)}"></div>
@@ -702,22 +737,23 @@ class SwarmStacksCard extends SwarmBaseCard {
           ${updates.length ? `<span class="chip warn"><ha-icon icon="mdi:arrow-up-circle"></ha-icon>${updates.length}</span>` : ""}
           ${s.a.failures_24h ? `<span class="chip bad"><ha-icon icon="mdi:alert-circle"></ha-icon>${esc(s.a.failures_24h)}</span>` : ""}
           ${counts}
-          ${this._manageable(s) ? this._menuToggle(`stack:${s.name}`) : ""}
+          ${this._manageable(s) ? this._rowActions(`stack:${s.name}`, s.deviceId, stackActions) : ""}
         </div>
-        ${this._manageable(s) ? this._menuStrip(`stack:${s.name}`, s.deviceId, actionsFor("stack", { state: s.state, managed: s.a.managed })) : ""}`;
+        ${this._manageable(s) ? this._rowBelow(`stack:${s.name}`, s.deviceId, stackActions) : ""}`;
       if (this._config.show_services && host) {
         row += (s.a.services || []).map((name) => {
           const c = containerByName(name);
           if (!c) return "";
           const cstate = val(hass, c.e.container_state);
           const key = `container:${c.deviceId}`;
+          const acts = actionsFor("container", { state: cstate });
           return `<div class="row small indent" data-entity="${esc(c.e.container_state)}">
               <div class="dot" style="background:${stateColor(cstate)}"></div>
               <span class="name">${esc(name)}</span>
               <span class="num muted">${esc(cstate ?? "–")}</span>
-              ${this._manageable(c) ? this._menuToggle(key) : ""}
+              ${this._manageable(c) ? this._rowActions(key, c.deviceId, acts) : ""}
             </div>
-            ${this._manageable(c) ? this._menuStrip(key, c.deviceId, actionsFor("container", { state: cstate })) : ""}`;
+            ${this._manageable(c) ? this._rowBelow(key, c.deviceId, acts) : ""}`;
         }).join("");
       } else if (this._config.show_services) {
         row += (s.a.services || []).map((name) => {
@@ -728,14 +764,15 @@ class SwarmStacksCard extends SwarmBaseCard {
           const sstate = val(hass, svc.e.service_status);
           const nodes = attr(hass, svc.e.service_status, "nodes") || [];
           const key = `service:${name}`;
+          const acts = actionsFor("service", { mode: attr(hass, svc.e.service_status, "mode") });
           return `<div class="row small indent" data-entity="${esc(svc.e.service_status)}">
               <div class="dot" style="background:${stateColor(sstate)}"></div>
               <span class="name">${esc(name.startsWith(`${s.name}_`) ? name.slice(s.name.length + 1) : name)}</span>
               <span class="pills">${nodes.map((n) => `<span class="chip">${esc(n)}</span>`).join("")}</span>
               <span class="num muted">${esc(sa ?? "–")}/${esc(sd ?? "–")}</span>
-              ${this._manageable(svc) ? this._menuToggle(key) : ""}
+              ${this._manageable(svc) ? this._rowActions(key, svc.deviceId, acts, { replicas: sd }) : ""}
             </div>
-            ${this._manageable(svc) ? this._menuStrip(key, svc.deviceId, actionsFor("service", { mode: attr(hass, svc.e.service_status, "mode") }), { replicas: sd }) : ""}`;
+            ${this._manageable(svc) ? this._rowBelow(key, svc.deviceId, acts, { replicas: sd }) : ""}`;
         }).join("");
       }
       return row;
@@ -770,6 +807,7 @@ class SwarmServicesCard extends SwarmBaseCard {
         { name: "include_standalone", default: false, selector: { boolean: {} } },
         { name: "show_resources", default: true, selector: { boolean: {} } },
         { name: "show_actions", default: false, selector: { boolean: {} } },
+        { name: "actions_layout", default: "inline", selector: { select: { mode: "dropdown", options: ["inline", "menu"] } } },
       ],
     };
   }
@@ -848,6 +886,7 @@ class SwarmServicesCard extends SwarmBaseCard {
       const healthy = r.state === "running" || r.state === "updating";
       // Grouped by node, a service can appear more than once; the key keeps one menu per row group.
       const key = `${r.kind}:${r.item.deviceId}:${group}`;
+      const acts = actionsFor(r.kind, { state: r.state, mode: r.mode });
       return `<div class="row" data-entity="${esc(r.entity)}" title="${esc(STATE_LABEL[r.state] || r.state || "")}">
           <div class="dot" style="background:${stateColor(r.state)}"></div>
           <span class="name">${esc(short)}</span>
@@ -856,9 +895,9 @@ class SwarmServicesCard extends SwarmBaseCard {
           ${groupBy !== "node" ? `<span class="pills">${r.nodes.map((n) => `<span class="chip">${esc(n)}</span>`).join("")}</span>` : ""}
           <span class="num small ${healthy ? "muted" : ""}" style="min-width:30px${healthy ? "" : `;color:${stateColor(r.state)}`}" title="${r.mode === "global" ? "Global service" : "Running / desired"}">${r.kind === "container" ? "" : `${esc(r.running ?? "–")}/${esc(r.desired ?? "–")}${r.mode === "global" ? "G" : ""}`}</span>
           ${showRes ? `<span class="num muted small" style="min-width:40px">${fmtPct(r.cpu)}</span><span class="num muted small" style="min-width:52px">${fmtMiB(r.memory)}</span>` : ""}
-          ${this._manageable(r.item) ? this._menuToggle(key) : ""}
+          ${this._manageable(r.item) ? this._rowActions(key, r.item.deviceId, acts, { replicas: r.desired }) : ""}
         </div>
-        ${this._manageable(r.item) ? this._menuStrip(key, r.item.deviceId, actionsFor(r.kind, { state: r.state, mode: r.mode }), { replicas: r.desired }) : ""}`;
+        ${this._manageable(r.item) ? this._rowBelow(key, r.item.deviceId, acts, { replicas: r.desired }) : ""}`;
     };
 
     let body = "";
