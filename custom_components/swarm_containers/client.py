@@ -1,4 +1,8 @@
-"""Read-only Portainer API client (GET requests only)."""
+"""Portainer API client.
+
+Monitoring only reads (GET). The write methods at the end are used by the
+management actions, which are off unless turned on in the options.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,7 @@ from typing import Any
 
 import aiohttp
 
-from .const import IMAGE_CHECK_TIMEOUT, LOG_TIMEOUT, REQUEST_TIMEOUT
+from .const import ACTION_TIMEOUT, DEPLOY_TIMEOUT, IMAGE_CHECK_TIMEOUT, LOG_TIMEOUT, REQUEST_TIMEOUT
 
 
 class PortainerError(Exception):
@@ -27,6 +31,22 @@ class PortainerResponseError(PortainerError):
     def __init__(self, message: str, status: int | None = None) -> None:
         super().__init__(message)
         self.status = status
+
+
+async def _reason(response: aiohttp.ClientResponse) -> str:
+    """Return Portainer's or Docker's error message from a failed response, if any."""
+    try:
+        data = await response.json(content_type=None)
+    except (ValueError, aiohttp.ClientError):
+        return ""
+    if isinstance(data, dict):
+        message = data.get("message") or data.get("details") or data.get("Message")
+        details = data.get("details")
+        if message and details and details != message:
+            message = f"{message}: {details}"
+        if message:
+            return f": {message}"
+    return ""
 
 
 # What Docker answers swarm requests with when the engine isn't part of a swarm.
@@ -52,21 +72,42 @@ class PortainerClient:
         raw: bool = False,
     ) -> Any:
         """GET a Portainer path and return its JSON (or its bytes with ``raw``)."""
+        return await self._request("GET", path, extra_headers, timeout, raw=raw)
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        extra_headers: dict[str, str] | None = None,
+        timeout: float = REQUEST_TIMEOUT,
+        *,
+        body: Any = None,
+        raw: bool = False,
+    ) -> Any:
+        """Send a request and return its JSON (None for an empty answer, bytes with ``raw``)."""
         headers = {"X-API-Key": self._api_token, **(extra_headers or {})}
         try:
-            async with self._session.get(
+            async with self._session.request(
+                method,
                 f"{self._base_url}{path}",
                 headers=headers,
+                json=body,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as response:
                 if response.status in (401, 403):
                     raise PortainerAuthError("Portainer rejected the API token")
+                # 204: done, nothing to say; 304: the container was already in that state.
+                if method != "GET" and response.status in (204, 304):
+                    return None
                 if response.status != 200:
                     raise PortainerResponseError(
-                        f"Portainer returned HTTP {response.status}", response.status
+                        f"Portainer returned HTTP {response.status}{await _reason(response)}",
+                        response.status,
                     )
                 if raw:
                     return await response.read()
+                if method != "GET" and not await response.read():
+                    return None
                 try:
                     return await response.json(content_type=None)
                 except ValueError as err:
@@ -198,4 +239,106 @@ class PortainerClient:
             {"X-PortainerAgent-Target": node} if node else None,
             LOG_TIMEOUT,
             raw=True,
+        )
+
+    # ----- management (write) requests -----
+
+    async def get_service(self, endpoint_id: int, service_id: str) -> dict[str, Any]:
+        """Return one swarm service with its current spec and version."""
+        data = await self._get(f"/api/endpoints/{endpoint_id}/docker/services/{service_id}")
+        if not isinstance(data, dict) or "Spec" not in data:
+            raise PortainerResponseError("Unexpected service response")
+        return data
+
+    async def update_service(
+        self,
+        endpoint_id: int,
+        service_id: str,
+        version: int,
+        spec: dict[str, Any],
+        rollback: bool = False,
+    ) -> None:
+        """Replace a service's spec (``version`` must be the one the spec was read at).
+
+        Registry credentials are taken from the spec, as ``docker service update`` does.
+        """
+        query = f"version={version}&registryAuthFrom=spec"
+        if rollback:
+            query += "&rollback=previous"
+        await self._request(
+            "POST",
+            f"/api/endpoints/{endpoint_id}/docker/services/{service_id}/update?{query}",
+            timeout=ACTION_TIMEOUT,
+            body=spec,
+        )
+
+    async def remove_service(self, endpoint_id: int, service_id: str) -> None:
+        """Remove a swarm service (its stack can create it again on redeploy)."""
+        await self._request(
+            "DELETE", f"/api/endpoints/{endpoint_id}/docker/services/{service_id}", timeout=ACTION_TIMEOUT
+        )
+
+    async def get_node(self, endpoint_id: int, node_id: str) -> dict[str, Any]:
+        """Return one swarm node with its spec and version."""
+        data = await self._get(f"/api/endpoints/{endpoint_id}/docker/nodes/{node_id}")
+        if not isinstance(data, dict) or "Spec" not in data:
+            raise PortainerResponseError("Unexpected node response")
+        return data
+
+    async def update_node(self, endpoint_id: int, node_id: str, version: int, spec: dict[str, Any]) -> None:
+        """Replace a swarm node's spec (role, availability, labels)."""
+        await self._request(
+            "POST",
+            f"/api/endpoints/{endpoint_id}/docker/nodes/{node_id}/update?version={version}",
+            timeout=ACTION_TIMEOUT,
+            body=spec,
+        )
+
+    async def container_action(
+        self, endpoint_id: int, container_id: str, action: str, node: str | None = None
+    ) -> None:
+        """Start, stop or restart a container, routed to the node it runs on."""
+        await self._request(
+            "POST",
+            f"/api/endpoints/{endpoint_id}/docker/containers/{container_id}/{action}",
+            {"X-PortainerAgent-Target": node} if node else None,
+            ACTION_TIMEOUT,
+        )
+
+    async def get_stack(self, stack_id: int) -> dict[str, Any]:
+        """Return one Portainer stack."""
+        data = await self._get(f"/api/stacks/{stack_id}")
+        if not isinstance(data, dict):
+            raise PortainerResponseError("Unexpected stack response")
+        return data
+
+    async def get_stack_file(self, stack_id: int) -> str:
+        """Return the compose file Portainer deployed a stack from."""
+        data = await self._get(f"/api/stacks/{stack_id}/file")
+        content = data.get("StackFileContent") if isinstance(data, dict) else None
+        if not isinstance(content, str):
+            raise PortainerResponseError("Unexpected stack file response")
+        return content
+
+    async def stack_action(self, stack_id: int, endpoint_id: int, action: str) -> None:
+        """Start or stop a Portainer stack."""
+        await self._request(
+            "POST", f"/api/stacks/{stack_id}/{action}?endpointId={endpoint_id}", timeout=DEPLOY_TIMEOUT
+        )
+
+    async def redeploy_stack(
+        self,
+        stack_id: int,
+        endpoint_id: int,
+        content: str,
+        env: list[dict[str, Any]],
+        pull_image: bool,
+        prune: bool,
+    ) -> None:
+        """Deploy a stack again from its compose file, optionally pulling newer images."""
+        await self._request(
+            "PUT",
+            f"/api/stacks/{stack_id}?endpointId={endpoint_id}",
+            timeout=DEPLOY_TIMEOUT,
+            body={"stackFileContent": content, "env": env, "prune": prune, "pullImage": pull_image},
         )

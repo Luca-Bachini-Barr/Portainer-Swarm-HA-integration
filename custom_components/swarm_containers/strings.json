@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to Portainer",
-        "description": "Read-only. Use a Portainer access token (My account > Access tokens).",
+        "description": "Use a Portainer access token (My account > Access tokens). Monitoring only reads; management actions can be turned on later in the options.",
         "data": {
           "url": "Portainer URL",
           "api_token": "API token",
@@ -45,13 +45,15 @@
           "image_check": "Check for image updates",
           "image_check_interval": "Image check interval (seconds)",
           "standalone_containers": "Create devices for standalone containers",
-          "update_history": "Record recent updates from Gantry / Watchtower"
+          "update_history": "Record recent updates from Gantry / Watchtower",
+          "management": "Allow management actions"
         },
         "data_description": {
           "image_check": "Asks Portainer to compare each running image with its registry. Read-only; nothing is pulled.",
           "image_check_interval": "Each check queries the registry once per image, so keep this infrequent.",
           "standalone_containers": "Containers on the nodes that are not part of a swarm service, such as ones started with docker run or compose.",
-          "update_history": "Reads the logs of a Gantry service or Watchtower container in this environment every 15 minutes and keeps the last 25 updates."
+          "update_history": "Reads the logs of a Gantry service or Watchtower container in this environment every 15 minutes and keeps the last 25 updates.",
+          "management": "Adds restart and redeploy buttons and lets the swarm_containers actions restart, redeploy, stop, start, scale and remove stacks, services and containers, and drain nodes. The token needs a Portainer user that may change this environment."
         }
       }
     }
@@ -181,6 +183,123 @@
     "button": {
       "check_updates": {
         "name": "Check for image updates"
+      },
+      "restart": {
+        "name": "Restart"
+      },
+      "redeploy": {
+        "name": "Redeploy (pull images)"
+      }
+    }
+  },
+  "services": {
+    "restart": {
+      "name": "Restart",
+      "description": "Restarts a stack, service or container. Services are restarted the way `docker service update --force` does (rolling, following the service's update config); a stack restarts all its services or containers.",
+      "fields": {
+        "device_id": {
+          "name": "Target",
+          "description": "Stacks, services or standalone containers."
+        }
+      }
+    },
+    "redeploy_stack": {
+      "name": "Redeploy stack",
+      "description": "Deploys a Portainer stack again from its compose file, optionally pulling newer images first. A service picks its stack.",
+      "fields": {
+        "device_id": {
+          "name": "Target",
+          "description": "Stacks, or services whose stack to redeploy."
+        },
+        "pull_image": {
+          "name": "Pull images",
+          "description": "Pull the latest image for each service before deploying."
+        },
+        "prune": {
+          "name": "Prune",
+          "description": "Remove services that are no longer in the compose file."
+        }
+      }
+    },
+    "start": {
+      "name": "Start",
+      "description": "Starts a stopped Portainer stack or a container.",
+      "fields": {
+        "device_id": {
+          "name": "Target",
+          "description": "Stacks or standalone containers."
+        }
+      }
+    },
+    "stop": {
+      "name": "Stop",
+      "description": "Stops a Portainer stack (its services are removed until it is started again) or a container.",
+      "fields": {
+        "device_id": {
+          "name": "Target",
+          "description": "Stacks or standalone containers."
+        }
+      }
+    },
+    "scale_service": {
+      "name": "Scale service",
+      "description": "Sets the number of replicas of a replicated service. 0 stops it without removing it.",
+      "fields": {
+        "device_id": {
+          "name": "Target",
+          "description": "Replicated services."
+        },
+        "replicas": {
+          "name": "Replicas",
+          "description": "Number of tasks to run."
+        }
+      }
+    },
+    "rollback_service": {
+      "name": "Roll back service",
+      "description": "Returns a service to its previous spec, like `docker service rollback`.",
+      "fields": {
+        "device_id": {
+          "name": "Target",
+          "description": "Services."
+        }
+      }
+    },
+    "remove_service": {
+      "name": "Remove service",
+      "description": "Removes a swarm service. With recreate on, its stack is then redeployed so the service comes back fresh (new tasks, networks re-attached).",
+      "fields": {
+        "device_id": {
+          "name": "Target",
+          "description": "Services."
+        },
+        "recreate": {
+          "name": "Recreate",
+          "description": "Redeploy the stack after removing, so the service is created again."
+        }
+      }
+    },
+    "set_node_availability": {
+      "name": "Set node availability",
+      "description": "Sets a swarm node to active, pause (no new tasks) or drain (moves its tasks to other nodes).",
+      "fields": {
+        "device_id": {
+          "name": "Target",
+          "description": "Swarm nodes."
+        },
+        "availability": {
+          "name": "Availability",
+          "description": "active, pause or drain."
+        }
+      }
+    }
+  },
+  "selector": {
+    "availability": {
+      "options": {
+        "active": "Active",
+        "pause": "Pause",
+        "drain": "Drain"
       }
     }
   }

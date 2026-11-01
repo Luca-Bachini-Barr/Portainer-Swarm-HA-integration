@@ -1,0 +1,95 @@
+restart:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          multiple: true
+          filter:
+            - integration: swarm_containers
+              model: Swarm stack
+            - integration: swarm_containers
+              model: Swarm service
+            - integration: swarm_containers
+              model: Standalone container
+redeploy_stack:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          multiple: true
+          filter:
+            - integration: swarm_containers
+              model: Swarm stack
+            - integration: swarm_containers
+              model: Swarm service
+    pull_image:
+      default: true
+      selector:
+        boolean:
+    prune:
+      default: false
+      selector:
+        boolean:
+start:
+  fields:
+    device_id: &stack_or_container
+      required: true
+      selector:
+        device:
+          multiple: true
+          filter:
+            - integration: swarm_containers
+              model: Swarm stack
+            - integration: swarm_containers
+              model: Standalone container
+stop:
+  fields:
+    device_id: *stack_or_container
+scale_service:
+  fields:
+    device_id: &service
+      required: true
+      selector:
+        device:
+          multiple: true
+          filter:
+            - integration: swarm_containers
+              model: Swarm service
+    replicas:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100
+          mode: box
+rollback_service:
+  fields:
+    device_id: *service
+remove_service:
+  fields:
+    device_id: *service
+    recreate:
+      default: false
+      selector:
+        boolean:
+set_node_availability:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          multiple: true
+          filter:
+            - integration: swarm_containers
+              model: Swarm node
+    availability:
+      required: true
+      selector:
+        select:
+          translation_key: availability
+          options:
+            - active
+            - pause
+            - drain

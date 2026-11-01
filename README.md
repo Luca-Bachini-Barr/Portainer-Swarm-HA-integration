@@ -1,6 +1,6 @@
 # Swarm Containers
 
-A read-only Home Assistant integration for a Docker Swarm, using the Portainer API. It understands the swarm: nodes and their roles, stacks, services and their replicas, where each task runs, failed tasks, paused updates, and image updates. It also ships dashboard cards.
+A Home Assistant integration for a Docker Swarm, using the Portainer API. It is read-only unless you turn on management actions. It understands the swarm: nodes and their roles, stacks, services and their replicas, where each task runs, failed tasks, paused updates, and image updates. It also ships dashboard cards.
 
 Home Assistant's built-in Portainer integration fails on swarm environments because container-level requests only reach one node. Tools like Dockhand see each node's containers but not the swarm services above them. This integration reads the swarm objects directly and names the target node on each stats request (`X-PortainerAgent-Target`), so CPU and memory work for containers on every node.
 
@@ -55,6 +55,42 @@ You can also add a Portainer environment that is a single Docker host (for examp
 - Stacks are the compose projects (from the `com.docker.compose.project` label), so stacks started outside Portainer show too. A stack is `running` when all its containers run, `degraded` when only some do and `stopped` when none do. Portainer stacks with no containers show as `stopped`.
 - The swarm-only sensors (nodes ready, services running, tasks, task failures, and each node's role and tasks) are not created.
 
+## Management actions
+
+Turn on **Allow management actions** in the integration options (it is off by default) to control the environment from Home Assistant. The Portainer token's user must be allowed to change the environment.
+
+This adds buttons:
+
+| Entity | Does |
+|---|---|
+| `button.service_<name>_restart` | Restarts the service's tasks the way `docker service update --force` does (rolling, following the service's update config) |
+| `button.stack_<name>_restart` | Restarts every service in the stack (on a single host: every container) |
+| `button.stack_<name>_redeploy_pull_images` | Deploys the stack again from the compose file Portainer holds, pulling newer images |
+| `button.<node>_<container>_restart` | Restarts a standalone container |
+
+And these actions, which take one or more Swarm Containers devices as `device_id`:
+
+| Action | Targets | Options |
+|---|---|---|
+| `swarm_containers.restart` | stack, service, container | |
+| `swarm_containers.redeploy_stack` | stack (or one of its services) | `pull_image` (default on), `prune` |
+| `swarm_containers.stop` / `start` | Portainer stack, container | |
+| `swarm_containers.scale_service` | replicated service | `replicas` (0 stops it without removing it) |
+| `swarm_containers.rollback_service` | service | |
+| `swarm_containers.remove_service` | service | `recreate`: then redeploy its stack so the service comes back fresh |
+| `swarm_containers.set_node_availability` | swarm node | `availability`: `active`, `pause` or `drain` |
+
+```yaml
+action: swarm_containers.remove_service
+data:
+  device_id: <service device>
+  recreate: true
+```
+
+Each action re-reads the spec it changes from Portainer just before changing it. Stacks deployed outside Portainer can be restarted but not redeployed, stopped or started. Git-based stacks can't be redeployed from here. Portainer's own server and agent services can't be stopped, scaled to 0 or removed, because that would cut Home Assistant off from the environment.
+
+With `show_actions: true`, the stacks and services cards show action icons at the end of each row (restart, redeploy, stop/start, scale, roll back, recreate, remove, depending on the row). Every action needs a second tap: the first turns the icon into a "Confirm …?" button. On narrow cards set `actions_layout: menu` to put the actions behind a ⋮ menu instead.
+
 ## Dashboard cards
 
 The cards are bundled with the integration, which adds them to your dashboard resources itself (and updates the entry after an upgrade). There's nothing to install separately. Search for "Swarm" in the add-card dialog. Each card has a visual editor.
@@ -107,6 +143,7 @@ You will be asked for:
 | Image check interval | 6 hours (minimum 1 hour). Each check asks the registry once per image |
 | Create devices for standalone containers | on |
 | Record recent updates from Gantry / Watchtower | on |
+| Allow management actions | off |
 
 ## How values are measured
 
@@ -118,10 +155,11 @@ You will be asked for:
 
 ## Security
 
-- The integration only performs HTTP `GET` requests. It cannot start, stop, scale or change anything. The **Check for image updates** button only reads.
-- The cards only read entities Home Assistant already has.
+- With **Allow management actions** off (the default), the integration only performs HTTP `GET` requests and cannot start, stop, scale or change anything. The **Check for image updates** button only reads.
+- With it on, anyone who can press buttons or call actions in Home Assistant can restart, redeploy, stop, scale and remove what that Portainer token can reach. The dashboard menus ask for a second tap, but buttons and actions don't.
+- The cards only read entities and, with `show_actions`, call the integration's actions; they never talk to Portainer.
 - The token is stored in the Home Assistant config entry, the same as any other integration credential.
-- A Portainer access token carries the permissions of the user who created it. Use a user with the least access that can still read the environment.
+- A Portainer access token carries the permissions of the user who created it. Use a user with the least access that still covers what you use: read access for monitoring, write access to the environment for management.
 
 ## Development
 
@@ -130,7 +168,7 @@ pip install pytest-homeassistant-custom-component
 python -m pytest -q
 ```
 
-The parsing logic in `parse.py` has no Home Assistant imports, so `tests/test_parse.py` runs with plain `pytest`. `tests/test_init.py` sets the integration up against a mocked Portainer and is skipped when the Home Assistant test package is missing.
+The parsing logic in `parse.py` has no Home Assistant imports, so `tests/test_parse.py` runs with plain `pytest`. `tests/test_init.py` and `tests/test_manage.py` set the integration up against a mocked Portainer and are skipped when the Home Assistant test package is missing.
 
 ## License
 

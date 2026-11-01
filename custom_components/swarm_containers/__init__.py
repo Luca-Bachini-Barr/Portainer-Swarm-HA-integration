@@ -1,4 +1,4 @@
-"""Swarm Containers: a read-only view of a Docker Swarm through Portainer."""
+"""Swarm Containers: a view of a Docker Swarm through Portainer, with optional management."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import DOMAIN, FRONTEND_URL, VERSION
 from .coordinator import SwarmContainersCoordinator
+from .services import async_setup_services
 
 PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SENSOR]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -22,7 +23,8 @@ type SwarmContainersConfigEntry = ConfigEntry[SwarmContainersCoordinator]
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Serve the bundled dashboard cards and register them with the dashboards."""
+    """Serve the bundled dashboard cards and register the management actions."""
+    async_setup_services(hass)
     await hass.http.async_register_static_paths(
         [
             StaticPathConfig(
