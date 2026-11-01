@@ -35,6 +35,7 @@ from .const import (
     CONF_ENDPOINT_ID,
     CONF_IMAGE_CHECK,
     CONF_IMAGE_CHECK_INTERVAL,
+    CONF_MANAGEMENT,
     CONF_SCAN_INTERVAL,
     CONF_STANDALONE,
     CONF_UPDATE_HISTORY,
@@ -201,7 +202,7 @@ class SwarmContainersConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class SwarmContainersOptionsFlow(OptionsFlow):
-    """Change polling, the image update check, devices and the update history."""
+    """Change polling, the image update check, devices, the update history and management."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
@@ -212,6 +213,7 @@ class SwarmContainersOptionsFlow(OptionsFlow):
                     CONF_IMAGE_CHECK_INTERVAL: int(user_input[CONF_IMAGE_CHECK_INTERVAL]),
                     CONF_STANDALONE: bool(user_input[CONF_STANDALONE]),
                     CONF_UPDATE_HISTORY: bool(user_input[CONF_UPDATE_HISTORY]),
+                    CONF_MANAGEMENT: bool(user_input[CONF_MANAGEMENT]),
                 }
             )
         options = self.config_entry.options
@@ -229,6 +231,7 @@ class SwarmContainersOptionsFlow(OptionsFlow):
                 vol.Required(
                     CONF_UPDATE_HISTORY, default=options.get(CONF_UPDATE_HISTORY, True)
                 ): bool,
+                vol.Required(CONF_MANAGEMENT, default=options.get(CONF_MANAGEMENT, False)): bool,
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)

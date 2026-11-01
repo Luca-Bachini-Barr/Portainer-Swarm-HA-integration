@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "swarm_containers"
-VERSION = "0.2.6"
+VERSION = "0.3.0"
 
 CONF_API_TOKEN = "api_token"
 CONF_ENDPOINT_ID = "endpoint_id"
@@ -13,6 +13,7 @@ CONF_IMAGE_CHECK = "image_check"
 CONF_IMAGE_CHECK_INTERVAL = "image_check_interval"
 CONF_STANDALONE = "standalone_containers"
 CONF_UPDATE_HISTORY = "update_history"
+CONF_MANAGEMENT = "management"
 
 DEFAULT_SCAN_INTERVAL = 60
 MIN_SCAN_INTERVAL = 30
@@ -36,6 +37,9 @@ MAX_CONCURRENT_STATS = 6
 MAX_CONCURRENT_IMAGE_CHECKS = 4
 REQUEST_TIMEOUT = 20
 IMAGE_CHECK_TIMEOUT = 90
+# Management actions: a container stop waits for its stop timeout; a redeploy may pull images.
+ACTION_TIMEOUT = 60
+DEPLOY_TIMEOUT = 600
 
 # Device models; the bundled cards use these to tell devices apart.
 MODEL_SWARM = "Swarm"
