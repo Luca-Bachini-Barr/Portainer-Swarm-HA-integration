@@ -243,3 +243,38 @@ async def test_client_write_requests(hass: HomeAssistant, aioclient_mock) -> Non
     await client.remove_service(1, "s2")
     with pytest.raises(PortainerResponseError, match="Unable to deploy: bad file"):
         await client.redeploy_stack(3, 1, "x", [], True, False)
+
+
+async def test_restart_respects_shared_networks(hass: HomeAssistant, portainer) -> None:
+    """A VPN container's dependents restart after it, whether it or its stack is restarted."""
+    from custom_components.swarm_containers.client import PortainerResponseError as Err
+
+    def not_swarm(_endpoint):
+        raise Err("Portainer returned HTTP 503", 503)
+
+    vpn = fx.host_container("v1" * 32, "gluetun", "vpn")
+    app = fx.host_container("v2" * 32, "qbittorrent", "vpn")
+    app["HostConfig"] = {"NetworkMode": f"container:{vpn['Id']}"}
+    by_name = fx.host_container("v3" * 32, "other", "misc")
+    by_name["HostConfig"] = {"NetworkMode": "container:gluetun"}
+    portainer.get_containers = AsyncMock(return_value=[vpn, app, by_name])
+    for name in ("get_nodes", "get_services", "get_tasks"):
+        setattr(portainer, name, AsyncMock(side_effect=not_swarm))
+    portainer.get_stacks = AsyncMock(return_value=[{"Id": 5, "Name": "vpn", "EndpointId": 1}])
+    portainer.get_endpoint = AsyncMock(return_value={"Id": 1, "Name": "NAS"})
+    portainer.get_info = AsyncMock(return_value=fx.HOST_INFO)
+    entry = await _setup(hass, True)
+    order = []
+    portainer.container_action = AsyncMock(side_effect=lambda _e, cid, _a, _n: order.append(cid[:2]))
+
+    await call(hass, "restart", device_id=device(hass, entry, "container_NAS/gluetun"))
+    assert order[0] == "v1" and sorted(order[1:]) == ["v2", "v3"]
+
+    order.clear()
+    await call(hass, "restart", device_id=device(hass, entry, "stack_vpn"))
+    assert order[0] == "v1" and sorted(order[1:]) == ["v2", "v3"]
+
+    # A dependent on its own restarts alone.
+    order.clear()
+    await call(hass, "restart", device_id=device(hass, entry, "container_NAS/qbittorrent"))
+    assert order == ["v2"]
