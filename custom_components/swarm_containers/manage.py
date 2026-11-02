@@ -100,8 +100,7 @@ class Manager:
         if kind == SERVICE:
             await self._force_update(self._service(key))
         elif kind == CONTAINER:
-            container = self._container(key)
-            await self._call(self.client.container_action(self.endpoint, container["full_id"], "restart", container["node"]))
+            await self._restart_containers([self._container(key)])
         elif kind == STACK:
             if self.data.get("swarm", True):
                 names = self._stack(key).get("services") or []
@@ -112,10 +111,7 @@ class Manager:
                 containers = self._stack_containers(key)
                 if not containers:
                     raise ServiceValidationError(f"Stack {key} has no containers; start it instead")
-                await self._gather(
-                    self.client.container_action(self.endpoint, c["full_id"], "restart", c["node"])
-                    for c in containers
-                )
+                await self._restart_containers(containers)
         else:
             raise ServiceValidationError("Restart works on a stack, service or container device")
 
@@ -203,6 +199,42 @@ class Manager:
 
     # ----- helpers -----
 
+    async def _restart_containers(self, targets: list[dict[str, Any]]) -> None:
+        """Restart containers, network providers before the containers that use their network.
+
+        A container started with ``network_mode: container:<x>`` (an app behind a VPN
+        container, say) loses its network when <x> restarts, so restarting <x> also
+        restarts those containers, after <x> is back.
+        """
+        everything = [c for c in self.data["standalone"].values() if c.get("full_id")]
+        # Network modes are read now, so they match what is running.
+        live = await self._call(self.client.get_containers(self.endpoint))
+        modes = {c.get("Id"): (c.get("HostConfig") or {}).get("NetworkMode") for c in live}
+
+        def parent(container: dict[str, Any]) -> str | None:
+            # network_mode names the container by id or by name.
+            ref = _network_parent(modes.get(container["full_id"]))
+            if not ref:
+                return None
+            return next(
+                (c["full_id"] for c in everything
+                 if c["full_id"].startswith(ref) or c["name"] == ref and c["node"] == container["node"]),
+                ref,
+            )
+
+        chosen = {c["full_id"]: c for c in targets}
+        for container in everything:
+            if parent(container) in chosen and container.get("state") == "running":
+                chosen[container["full_id"]] = container
+        first = [c for c in chosen.values() if parent(c) not in chosen]
+        after = [c for c in chosen.values() if parent(c) in chosen]
+        for group in (first, after):
+            if group:
+                await self._gather(
+                    self.client.container_action(self.endpoint, c["full_id"], "restart", c["node"])
+                    for c in group
+                )
+
     async def _force_update(self, service: dict[str, Any]) -> None:
         def change(spec: dict[str, Any]) -> None:
             template = spec.setdefault("TaskTemplate", {})
@@ -232,6 +264,11 @@ class Manager:
             return await awaitable
         except PortainerError as err:
             raise HomeAssistantError(f"Portainer: {err}") from err
+
+
+def _network_parent(mode: str | None) -> str | None:
+    """Return the id or name of the container whose network a network mode shares, if any."""
+    return mode.split(":", 1)[1] if mode and mode.startswith("container:") else None
 
 
 def manager_for(coordinator: SwarmContainersCoordinator) -> Manager:
